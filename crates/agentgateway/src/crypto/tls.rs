@@ -30,6 +30,22 @@ pub(crate) fn signature_verification_algorithms() -> rustls::crypto::WebPkiSuppo
 	provider().signature_verification_algorithms
 }
 
+/// Returns the TLS 1.3 cipher suites and key exchange groups of a provider, in order of
+/// preference: what it negotiates when only TLS 1.3 is allowed, as over QUIC.
+pub(crate) fn tls13_profile(
+	provider: &CryptoProvider,
+) -> (Vec<rustls::CipherSuite>, Vec<rustls::NamedGroup>) {
+	(
+		provider
+			.cipher_suites
+			.iter()
+			.filter(|s| s.tls13().is_some())
+			.map(|s| s.suite())
+			.collect(),
+		provider.kx_groups.iter().map(|g| g.name()).collect(),
+	)
+}
+
 /// Returns a [`CryptoProvider`] restricted to the given cipher suites and key
 /// exchange groups. An empty slice means "use the backend defaults".
 pub(crate) fn provider_with_options(
