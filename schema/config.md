@@ -1595,7 +1595,7 @@
 |`frontendPolicies.http.http2KeepaliveTimeout`|string|Time to wait for an HTTP/2 keepalive ping response.|
 |`frontendPolicies.http.maxConnectionDuration`|string|Maximum time a connection may stay open. After this duration, the connection is gracefully<br>closed after the current in-flight request completes. Useful for even traffic distribution<br>behind load balancers during scaling events.|
 |`frontendPolicies.http.maxConcurrentRequests`|integer|Maximum number of in-flight HTTP requests across this bind. This includes HTTP/1 requests<br>and HTTP/2 streams. Requests over the limit are rejected immediately.|
-|`frontendPolicies.http.http3`|object|Serve HTTP/3 (QUIC) on the UDP port matching each HTTPS listener of this bind, and advertise<br>it to HTTP/1.1 and HTTP/2 clients with an `Alt-Svc` response header. Disabled when unset.<br>Listeners that verify client certificates are not served over HTTP/3.|
+|`frontendPolicies.http.http3`|object|Serve HTTP/3 (QUIC) on the UDP port matching each HTTPS listener of this bind, and advertise<br>it to HTTP/1.1 and HTTP/2 clients with an `Alt-Svc` response header. Disabled when unset.<br>Listeners that verify client certificates, or whose own TLS versions, cipher suites or key<br>exchange groups differ from those of the frontend TLS policy, are not served over HTTP/3.|
 |`frontendPolicies.http.http3.altSvcMaxAge`|string|How long clients may cache the `Alt-Svc` advertisement (the `ma` parameter).<br>Defaults to 24 hours.|
 |`frontendPolicies.http.http3.idleTimeout`|string|How long an idle QUIC connection may stay open. Defaults to 30 seconds.|
 |`frontendPolicies.http.http3.maxConcurrentStreams`|integer|Maximum number of concurrent request streams per QUIC connection. Defaults to 100.|

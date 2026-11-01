@@ -232,6 +232,22 @@ fn select_listener(listeners: &ListenerSet, sni: &str) -> Option<Arc<Listener>> 
 		.filter(|l| matches!(l.protocol, ListenerProtocol::HTTPS(_)))
 }
 
+/// The TLS 1.3 cipher suites and key exchange groups of a provider, in order of preference: what
+/// it negotiates over QUIC, which only uses TLS 1.3.
+fn tls13_profile(
+	provider: &rustls::crypto::CryptoProvider,
+) -> (Vec<rustls::CipherSuite>, Vec<rustls::NamedGroup>) {
+	(
+		provider
+			.cipher_suites
+			.iter()
+			.filter(|s| s.tls13().is_some())
+			.map(|s| s.suite())
+			.collect(),
+		provider.kx_groups.iter().map(|g| g.name()).collect(),
+	)
+}
+
 /// Limits of the QUIC transport of an endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TransportLimits {
@@ -347,24 +363,6 @@ fn desired_state(pi: &ProxyInputs, bind_key: &BindKey) -> anyhow::Result<Option<
 		anyhow::bail!("HTTP/3 cannot be combined with egress actor resolution");
 	}
 
-	let mut resolvers = HashMap::new();
-	for listener in bind.listeners.iter() {
-		let ListenerProtocol::HTTPS(tls) = &listener.protocol else {
-			continue;
-		};
-		match tls.http3_cert_resolver() {
-			Some(resolver) => {
-				resolvers.insert(listener.key.clone(), resolver);
-			},
-			None => {
-				debug!(bind=%bind_key, listener=%listener.key, "listener is not served over HTTP/3: client certificate verification or workload identity is not supported");
-			},
-		}
-	}
-	if resolvers.is_empty() {
-		return Ok(None);
-	}
-
 	let tls_policy = policies.tls.clone().unwrap_or_default();
 	if tls_policy
 		.max_version
@@ -381,6 +379,35 @@ fn desired_state(pi: &ProxyInputs, bind_key: &BindKey) -> anyhow::Result<Option<
 			.as_deref()
 			.unwrap_or_default(),
 	)?;
+	let quic_profile = tls13_profile(&provider);
+
+	let mut resolvers = HashMap::new();
+	for listener in bind.listeners.iter() {
+		let ListenerProtocol::HTTPS(tls) = &listener.protocol else {
+			continue;
+		};
+		let Some(resolver) = tls.http3_cert_resolver() else {
+			debug!(bind=%bind_key, listener=%listener.key, "listener is not served over HTTP/3: client certificate verification or workload identity is not supported");
+			continue;
+		};
+		// The endpoint negotiates TLS with the frontend TLS policy for every listener; serving a
+		// listener whose own TLS settings differ would bypass them.
+		let same_profile = tls
+			.http3_tls_options(policies.tls.as_ref())
+			.and_then(|(suites, groups)| {
+				crate::transport::tls::provider_with_options_validated(&suites, &groups).ok()
+			})
+			.is_some_and(|p| tls13_profile(&p) == quic_profile);
+		if !same_profile {
+			debug!(bind=%bind_key, listener=%listener.key, "listener is not served over HTTP/3: its TLS versions, cipher suites or key exchange groups differ from those of the frontend TLS policy");
+			continue;
+		}
+		resolvers.insert(listener.key.clone(), resolver);
+	}
+	if resolvers.is_empty() {
+		return Ok(None);
+	}
+
 	let listener_keys: HashSet<ListenerKey> = resolvers.keys().cloned().collect();
 	let resolver = SniCertResolver {
 		listeners: bind.listeners.clone(),

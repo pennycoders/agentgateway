@@ -1529,3 +1529,48 @@ async fn requests_after_goaway_are_rejected() {
 		"the request after the GOAWAY reached the backend"
 	);
 }
+
+#[tokio::test]
+async fn listeners_with_their_own_tls_settings_are_not_served() {
+	use crate::transport::tls::CipherSuite;
+	let tls_with = |max_version, cipher_suites| {
+		ServerTLSConfig::from_pem_with_profile(
+			CERT.to_vec(),
+			KEY.to_vec(),
+			None,
+			vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+			None,
+			max_version,
+			cipher_suites,
+			None,
+			false,
+		)
+		.unwrap()
+	};
+	let serves = async |tls: ServerTLSConfig, frontend_tls: Option<serde_json::Value>| {
+		let (_mock, mut t, _port) = setup_without_serving(None, tls).await;
+		let mut policy = json!({ "http": { "http3": {} } });
+		if let Some(frontend_tls) = frontend_tls {
+			policy["tls"] = frontend_tls;
+		}
+		t.attach_frontend_policy(policy).await;
+		desired_state(&t.pi, &BIND_KEY).unwrap().is_some()
+	};
+
+	assert!(serves(tls_with(None, None), None).await);
+	// The listener only allows TLS 1.2 on TCP; QUIC would negotiate TLS 1.3.
+	assert!(
+		!serves(
+			tls_with(Some(crate::types::agent::TLSVersion::TLS_V1_2), None),
+			None
+		)
+		.await
+	);
+	// The listener restricts its cipher suites; QUIC would offer the default ones.
+	let restricted = || tls_with(None, Some(vec![CipherSuite::TLS_AES_128_GCM_SHA256]));
+	assert!(!serves(restricted(), None).await);
+	// The frontend TLS policy restricts them for every listener, QUIC included.
+	let frontend_suites = json!({ "cipherSuites": ["TLS_AES_128_GCM_SHA256"] });
+	assert!(serves(restricted(), Some(frontend_suites.clone())).await);
+	assert!(serves(tls_with(None, None), Some(frontend_suites)).await);
+}

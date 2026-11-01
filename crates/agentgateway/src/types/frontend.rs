@@ -103,7 +103,8 @@ pub struct HTTP {
 
 	/// Serve HTTP/3 (QUIC) on the UDP port matching each HTTPS listener of this bind, and advertise
 	/// it to HTTP/1.1 and HTTP/2 clients with an `Alt-Svc` response header. Disabled when unset.
-	/// Listeners that verify client certificates are not served over HTTP/3.
+	/// Listeners that verify client certificates, or whose own TLS versions, cipher suites or key
+	/// exchange groups differ from those of the frontend TLS policy, are not served over HTTP/3.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub http3: Option<HTTP3>,
 }

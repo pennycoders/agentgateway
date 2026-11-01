@@ -173,6 +173,9 @@ struct ServerTlsInputs {
 	default_cipher_suites: Vec<crate::transport::tls::CipherSuite>,
 	// Default key exchange groups configured at creation time.
 	default_key_exchange_groups: Vec<crate::transport::tls::KeyExchangeGroup>,
+	// Default TLS version range configured at creation time.
+	default_min_version: Option<TLSVersion>,
+	default_max_version: Option<TLSVersion>,
 	dynamic_ca_cert_cache: crate::DynamicCaCertCacheConfig,
 }
 
@@ -319,6 +322,8 @@ impl ServerTLSConfig {
 			default_alpns,
 			default_cipher_suites: cipher_suites.clone().unwrap_or_default(),
 			default_key_exchange_groups: key_exchange_groups.clone().unwrap_or_default(),
+			default_min_version: min_version,
+			default_max_version: max_version,
 			dynamic_ca_cert_cache: Default::default(),
 		});
 		let suites = cipher_suites.as_deref().filter(|s| !s.is_empty());
@@ -359,6 +364,8 @@ impl ServerTLSConfig {
 			default_alpns,
 			default_cipher_suites: cipher_suites.clone().unwrap_or_default(),
 			default_key_exchange_groups: key_exchange_groups.clone().unwrap_or_default(),
+			default_min_version: min_version,
+			default_max_version: max_version,
 			dynamic_ca_cert_cache,
 		});
 		let suites = cipher_suites.as_deref().filter(|s| !s.is_empty());
@@ -517,6 +524,36 @@ impl ServerTLSConfig {
 		let base = Arc::new(base);
 		writer.insert(key.clone(), Arc::clone(&base));
 		Ok(base)
+	}
+
+	/// Returns the cipher suites and key exchange groups this listener negotiates on TCP under the
+	/// frontend TLS policy `tls`, or `None` when it does not negotiate TLS 1.3 or they are unknown.
+	///
+	/// One QUIC endpoint serves every HTTPS listener of a bind with a single TLS configuration, so
+	/// only listeners negotiating the same settings as that configuration are served over HTTP/3.
+	pub fn http3_tls_options(
+		&self,
+		tls: Option<&frontend::TLS>,
+	) -> Option<(
+		Vec<crate::transport::tls::CipherSuite>,
+		Vec<crate::transport::tls::KeyExchangeGroup>,
+	)> {
+		let inputs = self.inputs.as_ref()?;
+		// Mirrors the configuration selection of `config_for`.
+		let (max_version, cipher_suites, key_exchange_groups) = match tls {
+			Some(tls) if !tls.is_fast_path() => {
+				let key = tls.server_tls_profile_key(inputs);
+				(key.max_version, key.cipher_suites, key.key_exchange_groups)
+			},
+			_ => (
+				inputs.default_max_version,
+				inputs.default_cipher_suites.clone(),
+				inputs.default_key_exchange_groups.clone(),
+			),
+		};
+		max_version
+			.is_none_or(|v| v == TLSVersion::TLS_V1_3)
+			.then_some((cipher_suites, key_exchange_groups))
 	}
 
 	/// Returns the certificate resolver to reuse when serving this listener over HTTP/3 (QUIC).
@@ -3540,6 +3577,8 @@ mod tests {
 			default_alpns: vec![b"h2".to_vec()],
 			default_cipher_suites: vec![CipherSuite::TLS_AES_128_GCM_SHA256],
 			default_key_exchange_groups: vec![KeyExchangeGroup::P384],
+			default_min_version: None,
+			default_max_version: None,
 			dynamic_ca_cert_cache: Default::default(),
 		};
 
