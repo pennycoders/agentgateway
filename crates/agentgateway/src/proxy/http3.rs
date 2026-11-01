@@ -91,6 +91,10 @@ const BIND_RETRY_MAX: Duration = Duration::from_secs(30);
 /// How often an endpoint that no longer serves HTTP/3 checks whether its connections are gone,
 /// so its UDP socket can be released.
 const RETIRED_ENDPOINT_POLL: Duration = Duration::from_secs(1);
+/// How long a request whose method has no body semantics waits for its stream to end after its
+/// headers, so it is forwarded without a body. A body that is still being sent is forwarded as it
+/// arrives once this passes.
+const BODYLESS_REQUEST_END_WAIT: Duration = Duration::from_millis(100);
 /// Invalidates the alternative services clients cached for the origin (RFC 7838, section 3).
 const ALT_SVC_CLEAR: HeaderValue = HeaderValue::from_static("clear");
 
@@ -1258,7 +1262,17 @@ async fn serve_request(
 		let _ = send_response(&mut send, response).await;
 		return;
 	};
-	let body = RequestBody::new(recv, content_length);
+	let mut body = RequestBody::new(recv, content_length);
+	if content_length.is_none() && !has_request_body_semantics(req.method()) {
+		// Clients may end the stream of a request without a body after its headers rather than
+		// with them. Wait briefly for the end, so the request is forwarded without a body, as over
+		// HTTP/1.1 and HTTP/2, instead of with an empty chunked one.
+		let _ = tokio::time::timeout(
+			BODYLESS_REQUEST_END_WAIT,
+			std::future::poll_fn(|cx| body.poll_ahead(cx)),
+		)
+		.await;
+	}
 	let mut req = req.map(|()| crate::http::Body::new(body));
 	if let Some(buffer) = ctx.buffer {
 		req.extensions_mut().insert(BufferLimit::new(buffer));
@@ -1346,6 +1360,19 @@ fn varint(code: Code) -> quinn::VarInt {
 	quinn::VarInt::from_u64(code.value()).unwrap_or(quinn::VarInt::MAX)
 }
 
+/// Whether requests with this method usually have a body. Methods whose request content has no
+/// defined semantics (RFC 9110, section 9.3) normally have none.
+fn has_request_body_semantics(method: &http::Method) -> bool {
+	!matches!(
+		*method,
+		http::Method::GET
+			| http::Method::HEAD
+			| http::Method::OPTIONS
+			| http::Method::DELETE
+			| http::Method::TRACE
+	)
+}
+
 /// The body of a downstream HTTP/3 request.
 ///
 /// It reports its exact length when the request has a `content-length`, and an empty body when
@@ -1392,23 +1419,34 @@ impl RequestBody {
 
 	/// Reads what already arrived, without waiting, to learn whether the body is empty.
 	fn read_ahead(&mut self) {
-		let mut cx = Context::from_waker(Waker::noop());
-		match self.stream.poll_recv_data(&mut cx) {
-			Poll::Ready(Ok(Some(mut data))) => {
-				self.buffered = Some(data.copy_to_bytes(data.remaining()));
-				return;
-			},
-			Poll::Ready(Ok(None)) => self.data_done = true,
-			// Errors are reported when the body is read.
-			Poll::Ready(Err(_)) | Poll::Pending => return,
+		let _ = self.poll_ahead(&mut Context::from_waker(Waker::noop()));
+	}
+
+	/// Reads until the first data, the trailers or the end of the body arrived.
+	fn poll_ahead(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+		if self.buffered.is_some() || self.trailers.is_some() || self.end {
+			return Poll::Ready(());
 		}
-		if let Poll::Ready(Ok(trailers)) = self.stream.poll_recv_trailers(&mut cx) {
-			match trailers {
-				Some(trailers) => self.trailers = Some(trailers),
-				// A content-length announcing data that never came is reported when reading.
-				None => self.end = self.remaining.is_none_or(|r| r == 0),
+		if !self.data_done {
+			match self.stream.poll_recv_data(cx) {
+				Poll::Ready(Ok(Some(mut data))) => {
+					self.buffered = Some(data.copy_to_bytes(data.remaining()));
+					return Poll::Ready(());
+				},
+				Poll::Ready(Ok(None)) => self.data_done = true,
+				// Errors are reported when the body is read.
+				Poll::Ready(Err(_)) => return Poll::Ready(()),
+				Poll::Pending => return Poll::Pending,
 			}
 		}
+		match self.stream.poll_recv_trailers(cx) {
+			Poll::Ready(Ok(Some(trailers))) => self.trailers = Some(trailers),
+			// A content-length announcing data that never came is reported when reading.
+			Poll::Ready(Ok(None)) => self.end = self.remaining.is_none_or(|r| r == 0),
+			Poll::Ready(Err(_)) => {},
+			Poll::Pending => return Poll::Pending,
+		}
+		Poll::Ready(())
 	}
 
 	fn account(&mut self, len: usize) -> Result<(), axum_core::BoxError> {

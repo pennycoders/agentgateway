@@ -1617,3 +1617,46 @@ async fn connection_migration_is_disabled() {
 	let config = format!("{:?}", desired.server_config);
 	assert!(config.contains("migration: false"), "{config}");
 }
+
+#[tokio::test]
+async fn bodyless_requests_ended_after_their_headers_have_no_body() {
+	let (_mock, t, port) = setup(Some(json!({}))).await;
+	wait_for_http3(&t, true).await;
+	let mut client = connect(port, "a.example.com").await;
+	for method in [Method::GET, Method::DELETE] {
+		let req = ::http::Request::builder()
+			.method(method.clone())
+			.uri("https://a.example.com/")
+			.body(())
+			.unwrap();
+		let mut stream = client.send.send_request(req).await.unwrap();
+		// The stream ends after the headers were received.
+		tokio::time::sleep(Duration::from_millis(20)).await;
+		stream.finish().await.unwrap();
+		let resp = stream.recv_response().await.unwrap();
+		assert_eq!(resp.status(), StatusCode::OK);
+		let mut body = Vec::new();
+		while let Some(mut chunk) = stream.recv_data().await.unwrap() {
+			body.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
+		}
+		let dump: RequestDump = serde_json::from_slice(&body).unwrap();
+		assert_eq!(dump.method, method);
+		assert!(
+			dump.headers.get(header::TRANSFER_ENCODING).is_none(),
+			"{method}: {:?}",
+			dump.headers
+		);
+		assert!(dump.headers.get(header::CONTENT_LENGTH).is_none());
+	}
+
+	// A body sent with such a method is still forwarded.
+	let req = ::http::Request::builder()
+		.method(Method::DELETE)
+		.uri("https://a.example.com/")
+		.body(())
+		.unwrap();
+	let resp = client
+		.request(req, Some(Bytes::from_static(b"payload")))
+		.await;
+	assert_eq!(resp.dump().body.as_ref(), b"payload");
+}
