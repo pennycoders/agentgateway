@@ -1005,6 +1005,11 @@ impl Connection {
 			.downstream_connection
 			.get_or_create(&labels)
 			.inc();
+		let _transport_metrics = TransportMetrics {
+			conn: conn.clone(),
+			metrics: pi.metrics.clone(),
+			labels,
+		};
 
 		let unverified_workload =
 			crate::cel::WorkloadContext::from_stores(&pi.stores, &pi.cfg.network, tcp.peer_addr.ip());
@@ -1157,6 +1162,30 @@ impl Connection {
 		conn.close(varint(Code::H3_NO_ERROR), b"");
 		drop(drain_blocker);
 		Ok(())
+	}
+}
+
+/// Records the bytes of a connection's UDP datagrams once it ends, like the TCP listener records
+/// the bytes of its sockets.
+struct TransportMetrics {
+	conn: quinn::Connection,
+	metrics: Arc<crate::telemetry::metrics::Metrics>,
+	labels: TCPLabels,
+}
+
+impl Drop for TransportMetrics {
+	fn drop(&mut self) {
+		let stats = self.conn.stats();
+		self
+			.metrics
+			.tcp_downstream_tx_bytes
+			.get_or_create(&self.labels)
+			.inc_by(stats.udp_tx.bytes);
+		self
+			.metrics
+			.tcp_downstream_rx_bytes
+			.get_or_create(&self.labels)
+			.inc_by(stats.udp_rx.bytes);
 	}
 }
 

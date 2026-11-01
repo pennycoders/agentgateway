@@ -329,6 +329,18 @@ async fn request_through_route() {
 			.get(),
 		1
 	);
+
+	// The bytes of the connection are recorded once it is closed.
+	client.conn.close(0u32.into(), b"");
+	let metrics = &t.pi.metrics;
+	tokio::time::timeout(Duration::from_secs(5), async {
+		while metrics.tcp_downstream_rx_bytes.get_or_create(&labels).get() == 0 {
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("received bytes are recorded");
+	assert!(metrics.tcp_downstream_tx_bytes.get_or_create(&labels).get() > 0);
 }
 
 #[tokio::test]
