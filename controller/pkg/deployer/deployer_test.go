@@ -341,6 +341,23 @@ func TestGatewayAndListenerSetPortModifications(t *testing.T) {
 		assert.Equal(t, int32(80), *ports[0].Port)
 	})
 
+	t.Run("GetPortsValues exposes the UDP port of HTTP/3 listeners", func(t *testing.T) {
+		gw := createGatewayForDeployer(80, 443, 8443)
+		gw.HTTP3Ports = smallset.New[int32](443, 8443)
+		gw.InternalPorts = smallset.New[int32](8443)
+		ports := deployer.GetPortsValues(gw, 0)
+
+		got := map[string]int32{}
+		for _, p := range ports {
+			got[*p.Protocol+"/"+*p.Name] = *p.Port
+		}
+		assert.Equal(t, map[string]int32{
+			"TCP/listener-80":  80,
+			"TCP/listener-443": 443,
+			"UDP/h3-443":       443,
+		}, got)
+	})
+
 	t.Run("GetPortsValues skips reserved ports", func(t *testing.T) {
 		// Include a reserved port (15020) alongside normal ports
 		gw := createGatewayForDeployer(8080, 15020, 9090)

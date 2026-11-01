@@ -52,6 +52,14 @@ func GetPortsValues(gw *collections.GatewayForDeployer, noListenersDummyPort int
 		gwPorts = AppendPortValue(gwPorts, port, portName)
 	}
 
+	// HTTP/3 is served on the UDP port with the same number as the HTTPS listener.
+	for _, port := range gw.HTTP3Ports.List() {
+		if gw.InternalPorts.Contains(port) || validateListenerPortForParent(port) != nil {
+			continue
+		}
+		gwPorts = appendPort(gwPorts, port, GenerateHTTP3PortName(port), "UDP")
+	}
+
 	if len(listenerPorts) == 0 && noListenersDummyPort != 0 {
 		port := noListenersDummyPort
 		portName := GenerateListenerNameFromPort(port)
@@ -97,12 +105,15 @@ func SanitizePortName(name string) string {
 }
 
 func AppendPortValue(gwPorts []HelmPort, port int32, name string) []HelmPort {
-	if slices.IndexFunc(gwPorts, func(p HelmPort) bool { return *p.Port == port }) != -1 {
+	return appendPort(gwPorts, port, name, "TCP")
+}
+
+func appendPort(gwPorts []HelmPort, port int32, name string, protocol string) []HelmPort {
+	if slices.IndexFunc(gwPorts, func(p HelmPort) bool { return *p.Port == port && *p.Protocol == protocol }) != -1 {
 		return gwPorts
 	}
 
 	portName := SanitizePortName(name)
-	protocol := "TCP"
 
 	return append(gwPorts, HelmPort{
 		Port:       &port,
@@ -192,6 +203,11 @@ func SetServiceFromGatewayAddresses(gw *gwv1.Gateway, svc *AgentgatewayHelmServi
 		svc.LoadBalancerIP = ip
 	}
 	return nil
+}
+
+// GenerateHTTP3PortName names the UDP Service port serving HTTP/3 for a listener port.
+func GenerateHTTP3PortName(port int32) string {
+	return fmt.Sprintf("h3-%d", port)
 }
 
 func GenerateListenerNameFromPort(port gwv1.PortNumber) string {

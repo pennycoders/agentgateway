@@ -171,6 +171,11 @@ func NewAgwCollections(
 		krtOptions.ToOptions("IstioMeshConfig")...,
 	)
 
+	agentgatewayPolicies := krt.NewFilteredInformer[*agentgateway.AgentgatewayPolicy](client, filter, krtOptions.ToOptions("informer/AgentgatewayPolicies")...)
+	policiesByNamespace := krtpkg.UnnamedIndex(agentgatewayPolicies, func(in *agentgateway.AgentgatewayPolicy) []string {
+		return []string{in.GetNamespace()}
+	})
+
 	agwCollections := &AgwCollections{
 		Client:   client,
 		KrtOpts:  krtOptions,
@@ -179,6 +184,8 @@ func NewAgwCollections(
 			gatewayClasses,
 			listenerSets,
 			byParentRefIndex,
+			agentgatewayPolicies,
+			policiesByNamespace,
 			meshConfig,
 			agwControllerName,
 		), krtOptions.ToOptions("deployer/Gateways")...),
@@ -244,7 +251,7 @@ func NewAgwCollections(
 		InferencePools: krt.NewDisabledCollection[*inf.InferencePool](krtOptions.ToOptions("disable/inferencepools")...),
 
 		// agentgateway-specific CRDs
-		AgentgatewayPolicies: krt.NewFilteredInformer[*agentgateway.AgentgatewayPolicy](client, filter, krtOptions.ToOptions("informer/AgentgatewayPolicies")...),
+		AgentgatewayPolicies: agentgatewayPolicies,
 		Backends:             krt.NewFilteredInformer[*agentgateway.AgentgatewayBackend](client, filter, krtOptions.ToOptions("informer/AgentgatewayBackends")...),
 		Models:               krt.NewDisabledCollection[*agentgateway.AgentgatewayModel](krtOptions.ToOptions("disable/AgentgatewayModels")...),
 	}

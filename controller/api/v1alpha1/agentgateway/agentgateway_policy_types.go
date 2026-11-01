@@ -838,8 +838,9 @@ type FrontendHTTP struct {
 	// processed by the same policies as other HTTP versions.
 	//
 	// HTTP/3 is disabled when unset. Listeners that verify client certificates
-	// are not served over HTTP/3. The Service exposing the gateway must also
-	// expose the UDP port.
+	// are not served over HTTP/3. For Gateways it deploys, the controller
+	// exposes the UDP port of each targeted HTTPS listener on the Service;
+	// otherwise, the UDP port must be exposed to clients separately.
 	// +optional
 	HTTP3 *FrontendHTTP3 `json:"http3,omitempty"`
 }
@@ -858,8 +859,17 @@ type FrontendHTTP3 struct {
 	// Maximum number of concurrent request streams per QUIC connection.
 	// If unset, this defaults to 100.
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10000
 	// +optional
 	MaxConcurrentStreams *int32 `json:"maxConcurrentStreams,omitempty"`
+	// UDP port advertised to clients in `Alt-Svc`, when they reach the
+	// gateway on a different port than the listener port, for example
+	// through NAT or a load balancer that remaps ports.
+	// If unset, the listener port is advertised.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	// +optional
+	AltSvcPort *int32 `json:"altSvcPort,omitempty"`
 }
 
 // +kubebuilder:validation:AtLeastOneFieldSet

@@ -10,11 +10,13 @@ import (
 	"istio.io/istio/pkg/slices"
 	"istio.io/istio/pkg/util/sets"
 	"istio.io/istio/pkg/util/smallset"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/agentgateway/agentgateway/controller/api/annotations"
+	"github.com/agentgateway/agentgateway/controller/api/v1alpha1/agentgateway"
 	"github.com/agentgateway/agentgateway/controller/pkg/utils/kubeutils"
 	"github.com/agentgateway/agentgateway/controller/pkg/wellknown"
 )
@@ -35,6 +37,8 @@ func GatewaysForDeployerTransformationFunc(
 	gatewayClasses krt.Collection[*gwv1.GatewayClass],
 	listenerSets krt.Collection[*gwv1.ListenerSet],
 	byParentRefIndex krt.Index[TargetRefIndexKey, *gwv1.ListenerSet],
+	policies krt.Collection[*agentgateway.AgentgatewayPolicy],
+	policiesByNamespace krt.Index[string, *agentgateway.AgentgatewayPolicy],
 	meshConfig krt.Singleton[ambient.MeshConfig],
 	controllerName string,
 ) func(kctx krt.HandlerContext, gw *gwv1.Gateway) *GatewayForDeployer {
@@ -74,6 +78,11 @@ func GatewaysForDeployerTransformationFunc(
 			}
 		}
 
+		// Only policies enabling HTTP/3 change the deployment, so only they are tracked.
+		http3Policies := krt.Fetch(kctx, policies, krt.FilterIndex(policiesByNamespace, gw.Namespace), krt.FilterGeneric(func(o any) bool {
+			return EnablesHTTP3(o.(*agentgateway.AgentgatewayPolicy))
+		}))
+
 		td := ptr.OrEmpty(slices.First(krt.PartialFetchComparable(kctx, meshConfig.AsCollection(), func(mc ambient.MeshConfig) string {
 			return mc.TrustDomain
 		})))
@@ -86,6 +95,7 @@ func GatewaysForDeployerTransformationFunc(
 			ControllerName:  string(gwClass.Spec.ControllerName),
 			Ports:           smallset.New(ports.UnsortedList()...),
 			InternalPorts:   ComputeInternalPorts(gw, lsets),
+			HTTP3Ports:      ComputeHTTP3Ports(gw, lsets, http3Policies),
 			MeshTrustDomain: td,
 		}
 		return ir
@@ -179,6 +189,9 @@ type GatewayForDeployer struct {
 	// from the generated Service and container ports. Derived from the winning listener's
 	// agentgateway.dev/internal-ports annotation.
 	InternalPorts smallset.Set[int32]
+	// HTTP3Ports are HTTPS listener ports on which an AgentgatewayPolicy enables HTTP/3.
+	// Their UDP port is exposed on the generated Service as well.
+	HTTP3Ports smallset.Set[int32]
 	// MeshTrustDomain changes should trigger reconciliation
 	// this field isn't read outside of Equals for a trigger
 	MeshTrustDomain string
@@ -209,6 +222,66 @@ func (c ObjectSource) GetNamespace() string {
 	return c.Namespace
 }
 
+// EnablesHTTP3 reports whether the policy enables HTTP/3 on the Gateways it targets.
+func EnablesHTTP3(policy *agentgateway.AgentgatewayPolicy) bool {
+	return policy.Spec.Frontend != nil && policy.Spec.Frontend.HTTP != nil && policy.Spec.Frontend.HTTP.HTTP3 != nil
+}
+
+// ComputeHTTP3Ports returns the HTTPS listener ports of the Gateway, including those of its
+// ListenerSets, on which one of the policies enables HTTP/3: the ports a policy targets, or every
+// HTTPS listener port when it targets the whole Gateway. The data plane serves HTTP/3 on the UDP
+// port with the same number. Policy precedence is not resolved here: exposing a UDP port that ends
+// up unused is harmless, since HTTP/3 is only advertised while it is served.
+func ComputeHTTP3Ports(gw *gwv1.Gateway, lsets []*gwv1.ListenerSet, policies []*agentgateway.AgentgatewayPolicy) smallset.Set[int32] {
+	if len(policies) == 0 {
+		return smallset.New[int32]()
+	}
+	httpsPorts := sets.New[int32]()
+	for _, l := range gw.Spec.Listeners {
+		if l.Protocol == gwv1.HTTPSProtocolType {
+			httpsPorts.Insert(l.Port)
+		}
+	}
+	for _, ls := range lsets {
+		for _, l := range ls.Spec.Listeners {
+			if l.Protocol != gwv1.HTTPSProtocolType {
+				continue
+			}
+			if port, err := kubeutils.DetectListenerPortNumber(l.Protocol, l.Port); err == nil {
+				httpsPorts.Insert(port)
+			}
+		}
+	}
+	ports := sets.New[int32]()
+	enable := func(port *int32) {
+		if port == nil {
+			ports.InsertAll(httpsPorts.UnsortedList()...)
+		} else if httpsPorts.Contains(*port) {
+			ports.Insert(*port)
+		}
+	}
+	isGateway := func(group gwv1.Group, kind gwv1.Kind) bool {
+		return string(group) == wellknown.GatewayGroup && string(kind) == wellknown.GatewayKind
+	}
+	for _, policy := range policies {
+		if policy.Namespace != gw.Namespace || !EnablesHTTP3(policy) {
+			continue
+		}
+		for _, ref := range policy.Spec.TargetRefs {
+			if isGateway(ref.Group, ref.Kind) && string(ref.Name) == gw.Name {
+				enable(ref.Port)
+			}
+		}
+		for _, selector := range policy.Spec.TargetSelectors {
+			if isGateway(selector.Group, selector.Kind) &&
+				labels.SelectorFromSet(selector.MatchLabels).Matches(labels.Set(gw.Labels)) {
+				enable(selector.Port)
+			}
+		}
+	}
+	return smallset.New(ports.UnsortedList()...)
+}
+
 func (c ObjectSource) ResourceName() string {
 	return fmt.Sprintf("%s/%s/%s/%s", c.Group, c.Kind, c.Namespace, c.Name)
 }
@@ -236,5 +309,6 @@ func (c GatewayForDeployer) Equals(in GatewayForDeployer) bool {
 		c.ControllerName == in.ControllerName &&
 		c.MeshTrustDomain == in.MeshTrustDomain &&
 		slices.Equal(c.Ports.List(), in.Ports.List()) &&
-		slices.Equal(c.InternalPorts.List(), in.InternalPorts.List())
+		slices.Equal(c.InternalPorts.List(), in.InternalPorts.List()) &&
+		slices.Equal(c.HTTP3Ports.List(), in.HTTP3Ports.List())
 }

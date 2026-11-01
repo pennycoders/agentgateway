@@ -7226,8 +7226,9 @@ spec:
                           processed by the same policies as other HTTP versions.
 
                           HTTP/3 is disabled when unset. Listeners that verify client certificates
-                          are not served over HTTP/3. The Service exposing the gateway must also
-                          expose the UDP port.
+                          are not served over HTTP/3. For Gateways it deploys, the controller
+                          exposes the UDP port of each targeted HTTPS listener on the Service;
+                          otherwise, the UDP port must be exposed to clients separately.
                         properties:
                           altSvcMaxAge:
                             description: |-
@@ -7239,6 +7240,16 @@ spec:
                             x-kubernetes-validations:
                             - message: altSvcMaxAge must be at least 1 second
                               rule: duration(self) >= duration('1s')
+                          altSvcPort:
+                            description: |-
+                              UDP port advertised to clients in `Alt-Svc`, when they reach the
+                              gateway on a different port than the listener port, for example
+                              through NAT or a load balancer that remaps ports.
+                              If unset, the listener port is advertised.
+                            format: int32
+                            maximum: 65535
+                            minimum: 1
+                            type: integer
                           idleTimeout:
                             description: |-
                               How long an idle QUIC connection may stay open.
@@ -7254,6 +7265,7 @@ spec:
                               Maximum number of concurrent request streams per QUIC connection.
                               If unset, this defaults to 100.
                             format: int32
+                            maximum: 10000
                             minimum: 1
                             type: integer
                         type: object

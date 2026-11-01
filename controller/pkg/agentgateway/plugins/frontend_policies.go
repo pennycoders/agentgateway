@@ -617,6 +617,9 @@ func translateFrontendHTTP(policy *agentgateway.AgentgatewayPolicy, name string)
 		if v := h3.MaxConcurrentStreams; v != nil {
 			spec.Http3.MaxConcurrentStreams = castUint32(v) //nolint:gosec // G115: kubebuilder validation ensures safe for uint32
 		}
+		if v := h3.AltSvcPort; v != nil {
+			spec.Http3.AltSvcPort = castUint32(v) //nolint:gosec // G115: kubebuilder validation ensures safe for uint32
+		}
 	}
 
 	httpPolicy := &api.Policy{

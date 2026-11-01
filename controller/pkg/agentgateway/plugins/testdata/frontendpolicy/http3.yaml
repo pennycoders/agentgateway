@@ -38,6 +38,7 @@ spec:
         altSvcMaxAge: 1h
         idleTimeout: 45s
         maxConcurrentStreams: 50
+        altSvcPort: 443
 ---
 apiVersion: agentgateway.dev/v1alpha1
 kind: AgentgatewayPolicy
@@ -82,6 +83,7 @@ output:
         http:
           http3:
             altSvcMaxAge: 3600s
+            altSvcPort: 443
             idleTimeout: 45s
             maxConcurrentStreams: 50
       key: frontend/default/http3-policy:frontend-http:default/test
