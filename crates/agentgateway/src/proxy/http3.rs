@@ -268,8 +268,37 @@ impl TransportLimits {
 /// What the QUIC endpoint of a bind should currently serve.
 struct Desired {
 	address: SocketAddr,
-	server_config: quinn::ServerConfig,
+	server_config: Arc<quinn::ServerConfig>,
+	served: Arc<ServedListeners>,
 	advertisement: Advertisement,
+}
+
+/// The listeners a QUIC server configuration was built from.
+///
+/// A handshake completes with the configuration that was current when it started, up to the TLS
+/// handshake timeout earlier, so its connection must be served by these listeners, not by those
+/// that are in the store by the time it completes.
+#[derive(Debug)]
+struct ServedListeners {
+	listeners: Arc<ListenerSet>,
+	/// The HTTPS listeners whose certificates the configuration serves.
+	served: HashSet<ListenerKey>,
+}
+
+impl ServedListeners {
+	/// Selects the listener serving a connection whose handshake used these listeners, and checks
+	/// that the store still serves the connection with it. Otherwise the connection could be served
+	/// by a listener that changed during the handshake, for example to verify client certificates,
+	/// or that a more specific listener added during the handshake now takes over.
+	fn select(&self, current: &ListenerSet, sni: &str) -> anyhow::Result<Arc<Listener>> {
+		let listener = select_listener(&self.listeners, sni)
+			.filter(|l| self.served.contains(&l.key))
+			.ok_or_else(|| anyhow::anyhow!("no HTTPS listener served over HTTP/3 matches {sni}"))?;
+		match select_listener(current, sni) {
+			Some(current) if current.serving_eq(&listener) => Ok(listener),
+			_ => anyhow::bail!("the listener for {sni} changed during the handshake"),
+		}
+	}
 }
 
 fn desired_state(pi: &ProxyInputs, bind_key: &BindKey) -> anyhow::Result<Option<Desired>> {
@@ -346,7 +375,7 @@ fn desired_state(pi: &ProxyInputs, bind_key: &BindKey) -> anyhow::Result<Option<
 			.as_deref()
 			.unwrap_or_default(),
 	)?;
-	let listener_keys = resolvers.keys().cloned().collect();
+	let listener_keys: HashSet<ListenerKey> = resolvers.keys().cloned().collect();
 	let resolver = SniCertResolver {
 		listeners: bind.listeners.clone(),
 		resolvers,
@@ -371,7 +400,11 @@ fn desired_state(pi: &ProxyInputs, bind_key: &BindKey) -> anyhow::Result<Option<
 		.map_or(bind.address.port(), std::num::NonZeroU16::get);
 	Ok(Some(Desired {
 		address: bind.address,
-		server_config,
+		server_config: Arc::new(server_config),
+		served: Arc::new(ServedListeners {
+			listeners: bind.listeners.clone(),
+			served: listener_keys.clone(),
+		}),
 		advertisement: Advertisement {
 			listeners: listener_keys,
 			alt_svc: alt_svc_value(port, max_age),
@@ -383,6 +416,9 @@ fn desired_state(pi: &ProxyInputs, bind_key: &BindKey) -> anyhow::Result<Option<
 /// A bound QUIC endpoint.
 struct Endpoint {
 	endpoint: quinn::Endpoint,
+	/// The configuration new connections are accepted with, and the listeners it was built from.
+	server_config: Arc<quinn::ServerConfig>,
+	served: Arc<ServedListeners>,
 	/// Set to true when the endpoint stops serving HTTP/3; its connections then drain.
 	/// Replaced by a fresh channel if HTTP/3 is enabled again.
 	retired: watch::Sender<bool>,
@@ -392,24 +428,34 @@ struct Endpoint {
 }
 
 impl Endpoint {
-	fn bind(address: SocketAddr, server_config: quinn::ServerConfig) -> anyhow::Result<Self> {
+	fn bind(
+		address: SocketAddr,
+		server_config: Arc<quinn::ServerConfig>,
+		served: Arc<ServedListeners>,
+	) -> anyhow::Result<Self> {
 		let socket = std::net::UdpSocket::bind(address)?;
 		let endpoint = quinn::Endpoint::new(
 			quinn::EndpointConfig::default(),
-			Some(server_config),
+			Some((*server_config).clone()),
 			socket,
 			Arc::new(quinn::TokioRuntime),
 		)?;
 		Ok(Self {
 			endpoint,
+			server_config,
+			served,
 			retired: watch::channel(false).0,
 			serving: true,
 			handshakes: Default::default(),
 		})
 	}
 
-	fn serve(&mut self, server_config: quinn::ServerConfig) {
-		self.endpoint.set_server_config(Some(server_config));
+	fn serve(&mut self, server_config: Arc<quinn::ServerConfig>, served: Arc<ServedListeners>) {
+		self
+			.endpoint
+			.set_server_config(Some((*server_config).clone()));
+		self.server_config = server_config;
+		self.served = served;
 		if !self.serving {
 			self.serving = true;
 			self.retired = watch::channel(false).0;
@@ -609,6 +655,8 @@ async fn supervise(
 						bind_key: bind_key.clone(),
 						policies,
 						peer_addr,
+						server_config: e.server_config.clone(),
+						served: e.served.clone(),
 						drain: upgrader.upgrade(weak.clone()),
 						retired: e.retired.subscribe(),
 						force_shutdown: force_shutdown.clone(),
@@ -670,8 +718,8 @@ fn reconcile(
 		return BindState::Ok;
 	};
 	match endpoint.as_mut() {
-		Some(e) => e.serve(desired.server_config),
-		None => match Endpoint::bind(desired.address, desired.server_config) {
+		Some(e) => e.serve(desired.server_config, desired.served),
+		None => match Endpoint::bind(desired.address, desired.server_config, desired.served) {
 			Ok(e) => {
 				info!(bind=%bind_key, address=%desired.address, "serving HTTP/3");
 				*endpoint = Some(e);
@@ -696,6 +744,9 @@ struct Connection {
 	bind_key: BindKey,
 	policies: FrontendPolices,
 	peer_addr: SocketAddr,
+	/// The configuration the handshake uses, and the listeners it was built from.
+	server_config: Arc<quinn::ServerConfig>,
+	served: Arc<ServedListeners>,
 	/// Drain handle of the gateway; holding it delays shutdown until the connection is done.
 	drain: DrainWatcher,
 	retired: watch::Receiver<bool>,
@@ -714,18 +765,19 @@ impl Connection {
 			.map(|t| t.handshake_timeout)
 			.unwrap_or_else(crate::defaults::tls_handshake_timeout);
 		let tls_start = Instant::now();
-		let conn =
-			match tokio::time::timeout(handshake_timeout, async { incoming.accept()?.await }).await {
-				Ok(Ok(conn)) => conn,
-				Ok(Err(e)) => {
-					debug!(bind=%self.bind_key, src.addr=%peer_addr, "QUIC handshake failed: {e}");
-					return;
-				},
-				Err(_) => {
-					debug!(bind=%self.bind_key, src.addr=%peer_addr, "QUIC handshake timed out");
-					return;
-				},
-			};
+		let server_config = self.server_config.clone();
+		let accept = async { incoming.accept_with(server_config)?.await };
+		let conn = match tokio::time::timeout(handshake_timeout, accept).await {
+			Ok(Ok(conn)) => conn,
+			Ok(Err(e)) => {
+				debug!(bind=%self.bind_key, src.addr=%peer_addr, "QUIC handshake failed: {e}");
+				return;
+			},
+			Err(_) => {
+				debug!(bind=%self.bind_key, src.addr=%peer_addr, "QUIC handshake timed out");
+				return;
+			},
+		};
 		drop(handshake);
 		let max_connections = self
 			.policies
@@ -756,6 +808,8 @@ impl Connection {
 			bind_key,
 			policies,
 			peer_addr,
+			server_config: _,
+			served,
 			drain,
 			mut retired,
 			mut force_shutdown,
@@ -772,9 +826,9 @@ impl Connection {
 		let Some(bind) = pi.stores.read_binds().bind(&bind_key) else {
 			anyhow::bail!("bind not found");
 		};
-		// The certificate was chosen with the same listener selection.
-		let listener = select_listener(&bind.listeners, &sni)
-			.ok_or_else(|| anyhow::anyhow!("no HTTPS listener match for {sni}"))?;
+		// The certificate was chosen with the same listener selection, among the listeners the
+		// handshake's configuration was built from.
+		let listener = served.select(&bind.listeners, &sni)?;
 
 		// A `[::]` bind sees IPv4 clients as IPv4-mapped IPv6 addresses; canonicalize them like the
 		// TCP listener does, so authorization, rate limits, workload lookup and logs see IPv4.

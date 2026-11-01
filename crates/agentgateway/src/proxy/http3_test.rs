@@ -964,11 +964,15 @@ async fn client_cancellation_cancels_the_upstream_request() {
 		.unwrap();
 }
 
-/// A certificate verifier that hangs, keeping a QUIC handshake in progress.
+/// A certificate verifier that blocks, keeping a QUIC handshake in progress, and then rejects the
+/// server certificate unless `accept` is set.
 #[derive(Debug)]
-struct HangingVerifier(Duration);
+struct SlowVerifier {
+	delay: Duration,
+	accept: bool,
+}
 
-impl rustls::client::danger::ServerCertVerifier for HangingVerifier {
+impl rustls::client::danger::ServerCertVerifier for SlowVerifier {
 	fn verify_server_cert(
 		&self,
 		_end_entity: &rustls::pki_types::CertificateDer<'_>,
@@ -977,8 +981,12 @@ impl rustls::client::danger::ServerCertVerifier for HangingVerifier {
 		_ocsp_response: &[u8],
 		_now: rustls::pki_types::UnixTime,
 	) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-		std::thread::sleep(self.0);
-		Err(rustls::Error::General("hung up".to_string()))
+		std::thread::sleep(self.delay);
+		if self.accept {
+			Ok(rustls::client::danger::ServerCertVerified::assertion())
+		} else {
+			Err(rustls::Error::General("hung up".to_string()))
+		}
 	}
 
 	fn verify_tls12_signature(
@@ -996,7 +1004,11 @@ impl rustls::client::danger::ServerCertVerifier for HangingVerifier {
 		_cert: &rustls::pki_types::CertificateDer<'_>,
 		_dss: &rustls::DigitallySignedStruct,
 	) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-		Err(rustls::Error::General("unused".to_string()))
+		if self.accept {
+			Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+		} else {
+			Err(rustls::Error::General("unused".to_string()))
+		}
 	}
 
 	fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
@@ -1008,6 +1020,17 @@ impl rustls::client::danger::ServerCertVerifier for HangingVerifier {
 			rustls::SignatureScheme::ED25519,
 		]
 	}
+}
+
+fn slow_client_tls(delay: Duration, accept: bool) -> rustls::ClientConfig {
+	let mut config = rustls::ClientConfig::builder_with_provider(crate::transport::tls::provider())
+		.with_protocol_versions(&[&rustls::version::TLS13])
+		.unwrap()
+		.dangerous()
+		.with_custom_certificate_verifier(Arc::new(SlowVerifier { delay, accept }))
+		.with_no_client_auth();
+	config.alpn_protocols = vec![b"h3".to_vec()];
+	config
 }
 
 #[tokio::test]
@@ -1026,15 +1049,7 @@ async fn handshakes_do_not_take_connection_capacity() {
 			.build()
 			.unwrap();
 		rt.block_on(async move {
-			let mut config =
-				rustls::ClientConfig::builder_with_provider(crate::transport::tls::provider())
-					.with_protocol_versions(&[&rustls::version::TLS13])
-					.unwrap()
-					.dangerous()
-					.with_custom_certificate_verifier(Arc::new(HangingVerifier(Duration::from_secs(3))))
-					.with_no_client_auth();
-			config.alpn_protocols = vec![b"h3".to_vec()];
-			let endpoint = client_endpoint(config).unwrap();
+			let endpoint = client_endpoint(slow_client_tls(Duration::from_secs(3), false)).unwrap();
 			let res = endpoint
 				.connect(SocketAddr::from(([127, 0, 0, 1], port)), "a.example.com")
 				.unwrap()
@@ -1259,4 +1274,106 @@ async fn request_header_size_is_limited() {
 		client.get("https://a.example.com/").await.status,
 		StatusCode::OK
 	);
+}
+
+#[test]
+fn connections_are_served_by_the_listeners_of_their_handshake() {
+	let served = |listeners: ListenerSet| {
+		let served = listeners.iter().map(|l| l.key.clone()).collect();
+		ServedListeners {
+			listeners: Arc::new(listeners),
+			served,
+		}
+	};
+	let handshake = served(ListenerSet::from_list([https_listener(server_tls(None))]));
+	let unchanged = ListenerSet::from_list([https_listener(server_tls(None))]);
+	assert_eq!(
+		handshake.select(&unchanged, "a.example.com").unwrap().key,
+		LISTENER_KEY
+	);
+	assert!(handshake.select(&unchanged, "a.other.com").is_err());
+
+	// The listener started verifying client certificates during the handshake.
+	let mtls = ListenerSet::from_list([https_listener(server_tls(Some(CA_CERT.to_vec())))]);
+	assert!(handshake.select(&mtls, "a.example.com").is_err());
+
+	// A more specific listener was added during the handshake.
+	let specific = Listener {
+		key: strng::new("specific"),
+		hostname: strng::new("a.example.com"),
+		..https_listener(server_tls(Some(CA_CERT.to_vec())))
+	};
+	let added = ListenerSet::from_list([https_listener(server_tls(None)), specific]);
+	assert!(handshake.select(&added, "a.example.com").is_err());
+	assert!(handshake.select(&added, "b.example.com").is_ok());
+
+	// The listener was removed during the handshake.
+	assert!(
+		handshake
+			.select(&ListenerSet::default(), "a.example.com")
+			.is_err()
+	);
+
+	// A listener the configuration does not serve never serves a connection.
+	let mut not_served = served(ListenerSet::from_list([https_listener(server_tls(None))]));
+	not_served.served.clear();
+	assert!(not_served.select(&unchanged, "a.example.com").is_err());
+}
+
+#[tokio::test]
+async fn listener_requiring_client_certificates_during_the_handshake_is_not_served() {
+	let mock = simple_mock().await;
+	let port = free_udp_port();
+	// Another listener keeps the endpoint serving once the first one requires client certificates.
+	let other = Listener {
+		key: strng::new("other"),
+		hostname: strng::new("other.test"),
+		..https_listener(server_tls(None))
+	};
+	let bind = bind_at(
+		SocketAddr::from(([127, 0, 0, 1], port)),
+		ListenerSet::from_list([https_listener(server_tls(None)), other]),
+	);
+	let mut t = test_with(*mock.address(), bind);
+	t.attach_frontend_policy(json!({ "http": { "http3": {} } }))
+		.await;
+	t.serve_http3(BIND_KEY);
+	wait_for_http3(&t, true).await;
+
+	// A client whose handshake is still in progress when the listener changes.
+	let client = std::thread::spawn(move || {
+		let rt = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.unwrap();
+		rt.block_on(async move {
+			let endpoint = client_endpoint(slow_client_tls(Duration::from_secs(1), true))?;
+			let conn = endpoint
+				.connect(SocketAddr::from(([127, 0, 0, 1], port)), "a.example.com")?
+				.await?;
+			let (mut driver, mut send) = h3::client::new(h3_quinn::Connection::new(conn)).await?;
+			tokio::spawn(async move { poll_fn(|cx| driver.poll_close(cx)).await });
+			let req = ::http::Request::builder()
+				.uri("https://a.example.com/")
+				.body(())?;
+			let mut stream = send.send_request(req).await?;
+			stream.finish().await?;
+			Ok::<_, anyhow::Error>(stream.recv_response().await?.status())
+		})
+	});
+	tokio::time::sleep(Duration::from_millis(300)).await;
+	assert!(!client.is_finished(), "the handshake is still in progress");
+	t.pi
+		.stores
+		.binds
+		.write()
+		.insert_listener(https_listener(server_tls(Some(CA_CERT.to_vec()))), BIND_KEY);
+
+	// The handshake completes with the certificate of the previous listener, but the connection is
+	// not served without the client certificate the listener now requires.
+	let res = tokio::task::spawn_blocking(move || client.join().unwrap())
+		.await
+		.unwrap();
+	assert!(res.is_err(), "served without a client certificate: {res:?}");
+	assert!(t.pi.http3.is_serving(&BIND_KEY, &strng::new("other")));
 }
