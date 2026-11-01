@@ -126,6 +126,10 @@ pub struct Store {
 	tcp_routes: HbHashMap<RouteTarget, Arc<TCPRouteSet>>,
 	listener_change_tx: watch::Sender<u64>,
 	listener_change_rx: watch::Receiver<u64>,
+	listener_set_change_tx: watch::Sender<u64>,
+	listener_set_change_rx: watch::Receiver<u64>,
+	frontend_policy_change_tx: watch::Sender<u64>,
+	frontend_policy_change_rx: watch::Receiver<u64>,
 
 	tx: tokio::sync::mpsc::UnboundedSender<BindEvent>,
 	rx: Option<tokio::sync::mpsc::UnboundedReceiver<BindEvent>>,
@@ -674,6 +678,8 @@ impl Store {
 	) -> Self {
 		let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 		let (listener_change_tx, listener_change_rx) = watch::channel(0);
+		let (listener_set_change_tx, listener_set_change_rx) = watch::channel(0);
+		let (frontend_policy_change_tx, frontend_policy_change_rx) = watch::channel(0);
 		Self {
 			ipv6_enabled,
 			dynamic_ca_cert_cache,
@@ -695,6 +701,10 @@ impl Store {
 			tcp_routes: Default::default(),
 			listener_change_tx,
 			listener_change_rx,
+			listener_set_change_tx,
+			listener_set_change_rx,
+			frontend_policy_change_tx,
+			frontend_policy_change_rx,
 			tx,
 			rx: Some(rx),
 		}
@@ -731,6 +741,32 @@ impl Store {
 
 	pub fn subscribe_listener_changes(&self) -> watch::Receiver<u64> {
 		self.listener_change_rx.clone()
+	}
+
+	/// Notifies whenever a listener is inserted, replaced or removed, including listeners added to
+	/// a bind. Unlike [`Self::subscribe_listener_changes`], which only reports changes to listeners
+	/// that may be serving connections, this reports every change to the listener sets.
+	/// Consumers re-read the listeners they depend on, so spurious notifications are harmless.
+	pub fn subscribe_listener_set_changes(&self) -> watch::Receiver<u64> {
+		self.listener_set_change_rx.clone()
+	}
+
+	fn notify_listener_set_changed(&self) {
+		self
+			.listener_set_change_tx
+			.send_modify(|epoch| *epoch = epoch.saturating_add(1));
+	}
+
+	/// Notifies whenever a frontend policy is inserted, replaced or removed. Consumers re-read the
+	/// frontend policies they depend on, so spurious notifications are harmless.
+	pub fn subscribe_frontend_policy_changes(&self) -> watch::Receiver<u64> {
+		self.frontend_policy_change_rx.clone()
+	}
+
+	fn notify_frontend_policy_changed(&self) {
+		self
+			.frontend_policy_change_tx
+			.send_modify(|epoch| *epoch = epoch.saturating_add(1));
 	}
 
 	pub fn get_bind_listener(&self, bind: &BindKey, listener: &ListenerKey) -> Option<Arc<Listener>> {
@@ -1663,12 +1699,15 @@ impl Store {
         fields(bind),
     )]
 	pub fn remove_policy(&mut self, pol: PolicyKey) {
-		if let Some(old) = self.policies_by_key.remove(&pol)
-			&& let Some(o) = self.policies_by_target.get_mut(&old.target)
-		{
-			o.remove(&pol);
-			if o.is_empty() {
-				self.policies_by_target.remove(&old.target);
+		if let Some(old) = self.policies_by_key.remove(&pol) {
+			if let Some(o) = self.policies_by_target.get_mut(&old.target) {
+				o.remove(&pol);
+				if o.is_empty() {
+					self.policies_by_target.remove(&old.target);
+				}
+			}
+			if old.policy.as_frontend().is_some() {
+				self.notify_frontend_policy_changed();
 			}
 		}
 	}
@@ -1691,14 +1730,21 @@ impl Store {
 	pub fn remove_listener(&mut self, listener: ListenerKey) {
 		let binds = &self.binds;
 		let mut serving_listener_changed = false;
+		let mut removed = false;
 		self.listeners.retain(|bind_key, listeners| {
-			if Arc::make_mut(listeners).remove(&listener).is_some() && binds.contains_key(bind_key) {
-				serving_listener_changed = true;
+			if Arc::make_mut(listeners).remove(&listener).is_some() {
+				removed = true;
+				if binds.contains_key(bind_key) {
+					serving_listener_changed = true;
+				}
 			}
 			!listeners.inner.is_empty()
 		});
 		if serving_listener_changed {
 			self.notify_listener_changed();
+		}
+		if removed {
+			self.notify_listener_set_changed();
 		}
 	}
 
@@ -1806,7 +1852,9 @@ impl Store {
 
 	pub fn insert_policy(&mut self, pol: TargetedPolicy) {
 		let pol = Arc::new(pol);
+		let mut frontend_changed = pol.policy.as_frontend().is_some();
 		if let Some(old) = self.policies_by_key.insert(pol.key.clone(), pol.clone()) {
+			frontend_changed |= old.policy.as_frontend().is_some();
 			// Remove the old target. We may add it back, though.
 			if let Some(o) = self.policies_by_target.get_mut(&old.target) {
 				o.remove(&pol.key);
@@ -1820,6 +1868,9 @@ impl Store {
 			.entry(pol.target.clone())
 			.or_default()
 			.insert(pol.key.clone());
+		if frontend_changed {
+			self.notify_frontend_policy_changed();
+		}
 	}
 
 	pub fn insert_listener(&mut self, lis: Listener, bind_name: BindKey) {
@@ -1848,6 +1899,7 @@ impl Store {
 		if serving_listener_changed {
 			self.notify_listener_changed();
 		}
+		self.notify_listener_set_changed();
 	}
 
 	pub fn insert_route_into_group(&mut self, r: Route, ln: RouteGroupKey) {
@@ -2278,9 +2330,15 @@ impl StoreUpdater {
 				.listeners
 				.get(&key)
 				.is_some_and(|old| Store::serving_listener_changed(old, &listeners));
+			let listener_set_changed = s.listeners.get(&key).is_none_or(|old| {
+				old.inner.len() != listeners.inner.len() || Store::serving_listener_changed(old, &listeners)
+			});
 			s.listeners.insert(key.clone(), listeners);
 			if listener_changed && s.binds.contains_key(&key) {
 				s.notify_listener_changed();
+			}
+			if listener_set_changed {
+				s.notify_listener_set_changed();
 			}
 			if let Err(err) = s.upsert_bind(key, b)
 				&& is_new_bind

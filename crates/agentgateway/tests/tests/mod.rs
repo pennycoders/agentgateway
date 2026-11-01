@@ -9,6 +9,7 @@ mod dfp;
 mod direct_response;
 mod drain;
 mod hbone;
+mod http3;
 mod llm;
 mod llm_providers;
 mod policy;

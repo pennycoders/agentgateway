@@ -74,7 +74,7 @@ pub struct HTTP {
 	/// Maximum HTTP/2 frame size.
 	#[serde(default)]
 	pub http2_frame_size: Option<u32>,
-	/// Maximum size of HTTP/2 request headers.
+	/// Maximum size of HTTP/2 request headers. Also limits HTTP/3 request headers.
 	#[serde(default)]
 	pub http2_max_header_size: Option<u32>,
 	/// Interval between HTTP/2 keepalive pings.
@@ -100,6 +100,55 @@ pub struct HTTP {
 	/// and HTTP/2 streams. Requests over the limit are rejected immediately.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub max_concurrent_requests: Option<NonZeroU32>,
+
+	/// Serve HTTP/3 (QUIC) on the UDP port matching each HTTPS listener of this bind, and advertise
+	/// it to HTTP/1.1 and HTTP/2 clients with an `Alt-Svc` response header. Disabled when unset.
+	/// Listeners that verify client certificates are not served over HTTP/3.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub http3: Option<HTTP3>,
+}
+
+#[apply(schema!)]
+#[derive(Default, PartialEq, Eq)]
+#[serde_with::skip_serializing_none]
+#[cfg_attr(feature = "schema", schemars(rename = "FrontendHTTP3"))]
+pub struct HTTP3 {
+	/// How long clients may cache the `Alt-Svc` advertisement (the `ma` parameter).
+	/// Defaults to 24 hours.
+	#[serde(with = "serde_dur_option")]
+	#[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
+	#[serde(default)]
+	pub alt_svc_max_age: Option<Duration>,
+	/// How long an idle QUIC connection may stay open. Defaults to 30 seconds.
+	#[serde(with = "serde_dur_option")]
+	#[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
+	#[serde(default)]
+	pub idle_timeout: Option<Duration>,
+	/// Maximum number of concurrent request streams per QUIC connection. Defaults to 100.
+	#[serde(default)]
+	pub max_concurrent_streams: Option<u32>,
+}
+
+impl HTTP3 {
+	pub const DEFAULT_ALT_SVC_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+	pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+	pub const DEFAULT_MAX_CONCURRENT_STREAMS: u32 = 100;
+
+	pub fn alt_svc_max_age(&self) -> Duration {
+		self
+			.alt_svc_max_age
+			.unwrap_or(Self::DEFAULT_ALT_SVC_MAX_AGE)
+	}
+
+	pub fn idle_timeout(&self) -> Duration {
+		self.idle_timeout.unwrap_or(Self::DEFAULT_IDLE_TIMEOUT)
+	}
+
+	pub fn max_concurrent_streams(&self) -> u32 {
+		self
+			.max_concurrent_streams
+			.unwrap_or(Self::DEFAULT_MAX_CONCURRENT_STREAMS)
+	}
 }
 
 impl Default for HTTP {
@@ -121,6 +170,7 @@ impl Default for HTTP {
 
 			max_connection_duration: None,
 			max_concurrent_requests: None,
+			http3: None,
 		}
 	}
 }

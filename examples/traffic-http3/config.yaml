@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+frontendPolicies:
+  http:
+    # Serve HTTP/3 (QUIC) on UDP port 3000, next to the HTTPS listener on TCP port 3000,
+    # and advertise it to HTTP/1.1 and HTTP/2 clients with an Alt-Svc header.
+    http3:
+      altSvcMaxAge: 1h
+binds:
+- port: 3000
+  listeners:
+  - name: default
+    protocol: HTTPS
+    tls:
+      cert: examples/mcp-tls/certs/cert.pem
+      key: examples/mcp-tls/certs/key.pem
+    routes:
+    - policies:
+        responseHeaderModifier:
+          add:
+            x-served-by: agentgateway
+        directResponse:
+          status: 200
+          body: "hello\n"

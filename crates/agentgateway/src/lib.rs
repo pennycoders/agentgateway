@@ -920,6 +920,8 @@ pub struct ProxyInputs {
 	pub ca: Option<Arc<CaClient>>,
 	pub spiffe: Option<Arc<control::spiffe::SpiffeClient>>,
 	pub admission: Arc<proxy::admission::AdmissionRegistry>,
+	/// HTTP/3 endpoints currently serving each bind, used to advertise them with `Alt-Svc`.
+	pub http3: Arc<proxy::http3::Http3Registry>,
 }
 
 impl ProxyInputs {
@@ -951,6 +953,7 @@ impl ProxyInputs {
 			ca,
 			spiffe,
 			admission: Default::default(),
+			http3: Default::default(),
 		}
 	}
 }

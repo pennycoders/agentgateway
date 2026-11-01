@@ -1590,11 +1590,15 @@
 |`frontendPolicies.http.http2WindowSize`|integer|HTTP/2 stream flow-control window size.|
 |`frontendPolicies.http.http2ConnectionWindowSize`|integer|HTTP/2 connection flow-control window size.|
 |`frontendPolicies.http.http2FrameSize`|integer|Maximum HTTP/2 frame size.|
-|`frontendPolicies.http.http2MaxHeaderSize`|integer|Maximum size of HTTP/2 request headers.|
+|`frontendPolicies.http.http2MaxHeaderSize`|integer|Maximum size of HTTP/2 request headers. Also limits HTTP/3 request headers.|
 |`frontendPolicies.http.http2KeepaliveInterval`|string|Interval between HTTP/2 keepalive pings.|
 |`frontendPolicies.http.http2KeepaliveTimeout`|string|Time to wait for an HTTP/2 keepalive ping response.|
 |`frontendPolicies.http.maxConnectionDuration`|string|Maximum time a connection may stay open. After this duration, the connection is gracefully<br>closed after the current in-flight request completes. Useful for even traffic distribution<br>behind load balancers during scaling events.|
 |`frontendPolicies.http.maxConcurrentRequests`|integer|Maximum number of in-flight HTTP requests across this bind. This includes HTTP/1 requests<br>and HTTP/2 streams. Requests over the limit are rejected immediately.|
+|`frontendPolicies.http.http3`|object|Serve HTTP/3 (QUIC) on the UDP port matching each HTTPS listener of this bind, and advertise<br>it to HTTP/1.1 and HTTP/2 clients with an `Alt-Svc` response header. Disabled when unset.<br>Listeners that verify client certificates are not served over HTTP/3.|
+|`frontendPolicies.http.http3.altSvcMaxAge`|string|How long clients may cache the `Alt-Svc` advertisement (the `ma` parameter).<br>Defaults to 24 hours.|
+|`frontendPolicies.http.http3.idleTimeout`|string|How long an idle QUIC connection may stay open. Defaults to 30 seconds.|
+|`frontendPolicies.http.http3.maxConcurrentStreams`|integer|Maximum number of concurrent request streams per QUIC connection. Defaults to 100.|
 |`frontendPolicies.tls`|object|Settings for handling incoming TLS connections.|
 |`frontendPolicies.tls.handshakeTimeout`|string|Maximum time allowed to complete the downstream TLS handshake.|
 |`frontendPolicies.tls.alpn`|array|ALPN protocols advertised to downstream clients.|

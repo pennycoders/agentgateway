@@ -809,6 +809,17 @@ func (this *FrontendPolicySpec_HTTP) UnmarshalJSON(b []byte) error {
 	return ResourceUnmarshaler.Unmarshal(bytes.NewReader(b), this)
 }
 
+// MarshalJSON is a custom marshaler for FrontendPolicySpec_HTTP_HTTP3
+func (this *FrontendPolicySpec_HTTP_HTTP3) MarshalJSON() ([]byte, error) {
+	str, err := ResourceMarshaler.MarshalToString(this)
+	return []byte(str), err
+}
+
+// UnmarshalJSON is a custom unmarshaler for FrontendPolicySpec_HTTP_HTTP3
+func (this *FrontendPolicySpec_HTTP_HTTP3) UnmarshalJSON(b []byte) error {
+	return ResourceUnmarshaler.Unmarshal(bytes.NewReader(b), this)
+}
+
 // MarshalJSON is a custom marshaler for FrontendPolicySpec_TLS
 func (this *FrontendPolicySpec_TLS) MarshalJSON() ([]byte, error) {
 	str, err := ResourceMarshaler.MarshalToString(this)

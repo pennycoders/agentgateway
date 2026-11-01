@@ -10789,7 +10789,7 @@
           "default": null
         },
         "http2MaxHeaderSize": {
-          "description": "Maximum size of HTTP/2 request headers.",
+          "description": "Maximum size of HTTP/2 request headers. Also limits HTTP/3 request headers.",
           "type": [
             "integer",
             "null"
@@ -10830,6 +10830,17 @@
           ],
           "format": "uint32",
           "minimum": 1
+        },
+        "http3": {
+          "description": "Serve HTTP/3 (QUIC) on the UDP port matching each HTTPS listener of this bind, and advertise\nit to HTTP/1.1 and HTTP/2 clients with an `Alt-Svc` response header. Disabled when unset.\nListeners that verify client certificates are not served over HTTP/3.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FrontendHTTP3"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -10847,6 +10858,38 @@
           "const": "preserve"
         }
       ]
+    },
+    "FrontendHTTP3": {
+      "type": "object",
+      "properties": {
+        "altSvcMaxAge": {
+          "description": "How long clients may cache the `Alt-Svc` advertisement (the `ma` parameter).\nDefaults to 24 hours.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "idleTimeout": {
+          "description": "How long an idle QUIC connection may stay open. Defaults to 30 seconds.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "maxConcurrentStreams": {
+          "description": "Maximum number of concurrent request streams per QUIC connection. Defaults to 100.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "default": null
+        }
+      },
+      "additionalProperties": false
     },
     "TLS": {
       "type": "object",

@@ -519,6 +519,30 @@ impl ServerTLSConfig {
 		Ok(base)
 	}
 
+	/// Returns the certificate resolver to reuse when serving this listener over HTTP/3 (QUIC).
+	///
+	/// QUIC needs a dedicated TLS 1.3 config advertising the `h3` ALPN, and one QUIC endpoint
+	/// serves every HTTPS listener of a bind, so only the certificate selection is shared with
+	/// the TCP listener. Listeners that verify client certificates, or whose identity comes from
+	/// a workload CA, are not served over HTTP/3: the client certificate verifier cannot be
+	/// selected per SNI on a shared endpoint.
+	pub fn http3_cert_resolver(&self) -> Option<Arc<dyn rustls::server::ResolvesServerCert>> {
+		match self.source {
+			ServerTlsCertificateSource::Static | ServerTlsCertificateSource::DynamicCa => {},
+			ServerTlsCertificateSource::IstioWorkload { .. }
+			| ServerTlsCertificateSource::Spiffe { .. } => return None,
+		}
+		// A config without inputs was built elsewhere; its client verifier is unknown.
+		let inputs = self.inputs.as_ref()?;
+		if inputs.root_pem.is_some() {
+			return None;
+		}
+		self
+			.base_config
+			.as_ref()
+			.map(|config| config.cert_resolver.clone())
+	}
+
 	pub fn allow_insecure_mtls(&self) -> bool {
 		if matches!(
 			self.source,

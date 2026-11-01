@@ -1460,6 +1460,18 @@ impl TestBind {
 		.expect("drain did not complete; something still holds a DrainWatcher")
 	}
 
+	/// Runs the HTTP/3 endpoint of the bind, as the gateway does for every bind. It only binds a UDP
+	/// socket, on the bind's port, once a frontend policy enables HTTP/3.
+	pub fn serve_http3(&self, bind_name: BindKey) {
+		let pi = self.pi.clone();
+		let drain = self.drain_rx.clone();
+		tokio::spawn(async move {
+			crate::proxy::http3::run_bind(pi, drain, bind_name)
+				.await
+				.unwrap();
+		});
+	}
+
 	pub async fn serve_gateway_listener(&self, bind_name: BindKey) -> SocketAddr {
 		let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
 		listener.set_nonblocking(true).unwrap();
@@ -1528,6 +1540,7 @@ pub fn setup_proxy_test_with_config_and_spiffe(
 
 		mcp_state: mcp::App::new(stores.clone(), encoder),
 		admission: Default::default(),
+		http3: Default::default(),
 	});
 	TestBind {
 		pi,

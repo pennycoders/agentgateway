@@ -176,6 +176,8 @@ impl Gateway {
 			binds.subscribe()
 		};
 		let mut active: HashMap<BindKey, ActiveBind> = HashMap::new();
+		// One HTTP/3 supervisor per bind; it stays idle (no UDP socket) unless HTTP/3 is enabled.
+		let mut active_http3: HashMap<BindKey, AbortHandle> = HashMap::new();
 		let mut handle_bind = |js: &mut JoinSet<anyhow::Result<()>>, b: BindEvent| {
 			let (bind_key, bind, listeners) = match b {
 				BindEvent::Add(bind, listeners) => (bind.key.clone(), bind, listeners),
@@ -189,12 +191,23 @@ impl Gateway {
 					if let Some(h) = active.remove(&bind_key) {
 						h.stop();
 					}
+					if let Some(h) = active_http3.remove(&bind_key) {
+						h.abort();
+					}
 					return;
 				},
 			};
 			if let Some(h) = active.remove(&bind_key) {
 				h.stop();
 			}
+			if let Some(h) = active_http3.remove(&bind_key) {
+				h.abort();
+			}
+			let http3 = js.spawn(
+				super::http3::run_bind(self.pi.clone(), subdrain.clone(), bind_key.clone())
+					.in_current_span(),
+			);
+			active_http3.insert(bind_key.clone(), http3);
 			let (config, config_rx) = watch::channel(Arc::new(bind));
 
 			debug!("add bind {}", config.borrow().address);
@@ -579,7 +592,10 @@ impl Gateway {
 		}
 	}
 
-	fn frontend_policies_for_bind(bind_name: &BindKey, inputs: &Arc<ProxyInputs>) -> FrontendPolices {
+	pub(super) fn frontend_policies_for_bind(
+		bind_name: &BindKey,
+		inputs: &Arc<ProxyInputs>,
+	) -> FrontendPolices {
 		{
 			let binds = inputs.stores.read_binds();
 			let gateway = binds
@@ -914,21 +930,7 @@ impl Gateway {
 		if let Some(ch) = stream.ext_mut().remove::<ConnectHeaders>() {
 			src.connect_headers = ch.0;
 		}
-		if let Some(network_authorization) = policies.network_authorization.as_ref()
-			&& let Err(e) = network_authorization.apply(&crate::cel::Executor::new_tcp(Some(&src), &dst))
-		{
-			anyhow::bail!("network authorization denied: {e}");
-		}
-		if let Some(authz) = policies.network_ext_authz.as_ref() {
-			authz
-				.check_network(
-					super::httpproxy::PolicyClient::new(inputs.clone()),
-					src.clone(),
-					dst.clone(),
-				)
-				.await
-				.map_err(|e| anyhow::anyhow!("network external authorization denied: {e}"))?;
-		}
+		Self::authorize_downstream_connection(&inputs, &policies, &src, &dst).await?;
 		stream.ext_mut().insert(src);
 		stream.ext_mut().insert(dst);
 
@@ -974,6 +976,11 @@ impl Gateway {
 		// Set once max_connection_duration is reached, asking HTTP/1 clients to close.
 		let close_connection = Arc::new(AtomicBool::new(false));
 		let service_close_connection = close_connection.clone();
+		// HTTP/3 is only ever served for HTTPS listeners; advertise it on their responses.
+		let alt_svc_listener = selected_listener
+			.as_ref()
+			.filter(|l| matches!(l.protocol, ListenerProtocol::HTTPS(_)))
+			.map(|l| l.key.clone());
 
 		let serve = server.serve_connection_with_upgrades(
 			TokioIo::new(stream),
@@ -982,6 +989,9 @@ impl Gateway {
 				let connection = connection.clone();
 				let drain_observer = drain_observer.clone();
 				let close_connection = service_close_connection.clone();
+				let alt_svc = alt_svc_listener
+					.clone()
+					.map(|l| (proxy.inputs.http3.clone(), proxy.bind_name.clone(), l));
 				let is_http1 = matches!(req.version(), Version::HTTP_10 | Version::HTTP_11);
 
 				// Ensure we have capacity before we allocate the large proxy future.
@@ -1020,6 +1030,9 @@ impl Gateway {
 						&close_connection,
 						&mut response,
 					);
+					if let Some((http3, bind, listener)) = alt_svc {
+						http3.advertise(&bind, &listener, response.headers_mut());
+					}
 					Ok(response.map(|body| body.with_drop_guard(request_permit)))
 				})
 			}),
@@ -1094,6 +1107,32 @@ impl Gateway {
 				anyhow::bail!("{e}");
 			},
 		}
+	}
+
+	/// Applies the frontend network authorization policies to a new downstream connection that
+	/// will carry HTTP requests.
+	pub(super) async fn authorize_downstream_connection(
+		inputs: &Arc<ProxyInputs>,
+		policies: &FrontendPolices,
+		src: &crate::cel::SourceContext,
+		dst: &crate::cel::DestinationContext,
+	) -> anyhow::Result<()> {
+		if let Some(network_authorization) = policies.network_authorization.as_ref()
+			&& let Err(e) = network_authorization.apply(&crate::cel::Executor::new_tcp(Some(src), dst))
+		{
+			anyhow::bail!("network authorization denied: {e}");
+		}
+		if let Some(authz) = policies.network_ext_authz.as_ref() {
+			authz
+				.check_network(
+					super::httpproxy::PolicyClient::new(inputs.clone()),
+					src.clone(),
+					dst.clone(),
+				)
+				.await
+				.map_err(|e| anyhow::anyhow!("network external authorization denied: {e}"))?;
+		}
+		Ok(())
 	}
 
 	async fn proxy_tcp(
@@ -1814,6 +1853,7 @@ pub fn auto_server(c: Option<&frontend::HTTP>) -> auto::Builder<::hyper_util::rt
 		http2_keepalive_timeout,
 		max_connection_duration: _, // Not handled here
 		max_concurrent_requests: _, // Not handled here
+		http3: _,                   // Served by the QUIC endpoint, see proxy::http3
 	} = c.unwrap_or(&def);
 
 	if let Some(m) = http1_max_headers {

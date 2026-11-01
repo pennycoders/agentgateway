@@ -3560,6 +3560,11 @@ fn frontend_policy_from_proto(
 			max_concurrent_requests: h
 				.max_concurrent_requests
 				.and_then(std::num::NonZeroU32::new),
+			http3: h.http3.as_ref().map(|h3| frontend::HTTP3 {
+				alt_svc_max_age: h3.alt_svc_max_age.map(convert_duration),
+				idle_timeout: h3.idle_timeout.map(convert_duration),
+				max_concurrent_streams: h3.max_concurrent_streams,
+			}),
 		}),
 		Some(fps::Kind::Tls(t)) => FrontendPolicy::TLS(frontend::TLS {
 			handshake_timeout: t
@@ -6567,6 +6572,57 @@ mod tests {
 		};
 
 		assert_eq!(metrics.add.len(), 0);
+		Ok(())
+	}
+
+	#[test]
+	fn test_frontend_policy_spec_http3() -> Result<(), ProtoError> {
+		use crate::types::proto::agent::frontend_policy_spec as fps;
+
+		let http = |http3| proto::agent::FrontendPolicySpec {
+			kind: Some(fps::Kind::Http(fps::Http {
+				http3,
+				..Default::default()
+			})),
+		};
+		let mut diag = Diagnostics::default();
+
+		let FrontendPolicy::HTTP(disabled) = frontend_policy_from_proto(&http(None), &mut diag)? else {
+			panic!("Expected HTTP policy variant");
+		};
+		assert!(disabled.http3.is_none(), "HTTP/3 is disabled by default");
+
+		let spec = http(Some(fps::http::Http3 {
+			alt_svc_max_age: Some(prost_types::Duration {
+				seconds: 3600,
+				nanos: 0,
+			}),
+			idle_timeout: Some(prost_types::Duration {
+				seconds: 10,
+				nanos: 0,
+			}),
+			max_concurrent_streams: Some(50),
+		}));
+		let FrontendPolicy::HTTP(enabled) = frontend_policy_from_proto(&spec, &mut diag)? else {
+			panic!("Expected HTTP policy variant");
+		};
+		assert_eq!(
+			enabled.http3,
+			Some(crate::types::frontend::HTTP3 {
+				alt_svc_max_age: Some(Duration::from_secs(3600)),
+				idle_timeout: Some(Duration::from_secs(10)),
+				max_concurrent_streams: Some(50),
+			})
+		);
+
+		let spec = http(Some(fps::http::Http3::default()));
+		let FrontendPolicy::HTTP(defaults) = frontend_policy_from_proto(&spec, &mut diag)? else {
+			panic!("Expected HTTP policy variant");
+		};
+		assert_eq!(
+			defaults.http3,
+			Some(crate::types::frontend::HTTP3::default())
+		);
 		Ok(())
 	}
 

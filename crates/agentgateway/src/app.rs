@@ -182,6 +182,7 @@ pub async fn run_with_ui_assets(
 
 		mcp_state: mcp::App::new(stores.clone(), config.session_encoder.clone()),
 		admission: Default::default(),
+		http3: Default::default(),
 	};
 
 	let gw = proxy::Gateway::new(Arc::new(pi), drain_rx.clone());

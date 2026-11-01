@@ -1,6 +1,7 @@
 pub mod admission;
 pub mod dtrace;
 mod gateway;
+pub mod http3;
 pub mod httpproxy;
 pub mod policy_host;
 pub mod proxy_protocol;

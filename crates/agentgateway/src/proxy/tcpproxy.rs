@@ -1061,6 +1061,7 @@ mod tests {
 			spiffe: None,
 			mcp_state: crate::mcp::App::new(stores, encoder),
 			admission: Default::default(),
+			http3: Default::default(),
 		})
 	}
 

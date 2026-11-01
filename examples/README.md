@@ -48,6 +48,7 @@ span more than one agentgateway traffic type.
 ### Traffic
 
 * [traffic-http](traffic-http/README.md): use agentgateway as a standard HTTP proxy.
+* [traffic-http3](traffic-http3/README.md): serve HTTP/3 (QUIC) next to an HTTPS listener.
 * [traffic-egress-proxy](traffic-egress-proxy/README.md): use agentgateway as an allowlisted CONNECT egress proxy with dynamic public backends and a fixed in-cluster route.
 * [traffic-a2a](traffic-a2a/README.md): proxy [A2A](https://a2aproject.github.io/A2A/) traffic.
 * [traffic-aws-agentcore](traffic-aws-agentcore/README.md): proxy AWS AgentCore traffic with JWT auth and user-id header forwarding.
