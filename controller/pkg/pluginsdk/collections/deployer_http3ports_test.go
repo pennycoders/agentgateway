@@ -18,7 +18,7 @@ import (
 
 func http3Gateway(labels map[string]string, listeners ...gwv1.Listener) *gwv1.Gateway {
 	g := &gwv1.Gateway{
-		ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "ns", Labels: labels},
+		Name: "gw", Namespace: "ns", Labels: labels,
 	}
 	g.Spec.Listeners = listeners
 	return g
@@ -30,7 +30,7 @@ func listener(name string, protocol gwv1.ProtocolType, port gwv1.PortNumber) gwv
 
 func http3Policy(namespace string, refs []agentgateway.LocalPolicyTargetReferenceWithSectionName, selectors []agentgateway.LocalPolicyTargetSelectorWithSectionName) *agentgateway.AgentgatewayPolicy {
 	return &agentgateway.AgentgatewayPolicy{
-		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: namespace},
+		Name: "p", Namespace: namespace,
 		Spec: agentgateway.AgentgatewayPolicySpec{
 			TargetRefs:      refs,
 			TargetSelectors: selectors,
@@ -43,12 +43,10 @@ func http3Policy(namespace string, refs []agentgateway.LocalPolicyTargetReferenc
 
 func gatewayRef(name string, port *int32) []agentgateway.LocalPolicyTargetReferenceWithSectionName {
 	return []agentgateway.LocalPolicyTargetReferenceWithSectionName{{
-		LocalPolicyTargetReference: agentgateway.LocalPolicyTargetReference{
-			Group: gwv1.GroupName,
-			Kind:  "Gateway",
-			Name:  gwv1.ObjectName(name),
-		},
-		Port: port,
+		Group: gwv1.GroupName,
+		Kind:  "Gateway",
+		Name:  gwv1.ObjectName(name),
+		Port:  port,
 	}}
 }
 
@@ -60,7 +58,7 @@ func TestComputeHTTP3Ports(t *testing.T) {
 		listener("alt", gwv1.HTTPSProtocolType, 8443),
 		listener("passthrough", gwv1.TLSProtocolType, 9443),
 	)
-	listenerSet := &gwv1.ListenerSet{ObjectMeta: metav1.ObjectMeta{Name: "ls", Namespace: "ns", CreationTimestamp: metav1.NewTime(time.Now())}}
+	listenerSet := &gwv1.ListenerSet{Name: "ls", Namespace: "ns", CreationTimestamp: metav1.NewTime(time.Now())}
 	listenerSet.Spec.Listeners = []gwv1.ListenerEntry{{Name: "extra", Protocol: gwv1.HTTPSProtocolType, Port: 10443}}
 
 	noHTTP3 := http3Policy("ns", gatewayRef("gw", nil), nil)
@@ -106,11 +104,11 @@ func TestComputeHTTP3Ports(t *testing.T) {
 			name: "label selectors",
 			policies: []*agentgateway.AgentgatewayPolicy{
 				http3Policy("ns", nil, []agentgateway.LocalPolicyTargetSelectorWithSectionName{{
-					LocalPolicyTargetSelector: agentgateway.LocalPolicyTargetSelector{Group: gwv1.GroupName, Kind: "Gateway", MatchLabels: map[string]string{"app": "edge"}},
-					Port:                      port(443),
+					Group: gwv1.GroupName, Kind: "Gateway", MatchLabels: map[string]string{"app": "edge"},
+					Port: port(443),
 				}}),
 				http3Policy("ns", nil, []agentgateway.LocalPolicyTargetSelectorWithSectionName{{
-					LocalPolicyTargetSelector: agentgateway.LocalPolicyTargetSelector{Group: gwv1.GroupName, Kind: "Gateway", MatchLabels: map[string]string{"app": "other"}},
+					Group: gwv1.GroupName, Kind: "Gateway", MatchLabels: map[string]string{"app": "other"},
 				}}),
 			},
 			want: []int32{443},
@@ -131,8 +129,8 @@ func TestGatewaysForDeployerTracksHTTP3Policies(t *testing.T) {
 	stop := test.NewStop(t)
 	opts := []krt.CollectionOption{krt.WithStop(stop)}
 	classes := krt.NewStaticCollection(nil, []*gwv1.GatewayClass{{
-		ObjectMeta: metav1.ObjectMeta{Name: "agw"},
-		Spec:       gwv1.GatewayClassSpec{ControllerName: "example.com/agw"},
+		Name: "agw",
+		Spec: gwv1.GatewayClassSpec{ControllerName: "example.com/agw"},
 	}}, opts...)
 	gateway := http3Gateway(nil, listener("https", gwv1.HTTPSProtocolType, 443))
 	gateway.Spec.GatewayClassName = "agw"
