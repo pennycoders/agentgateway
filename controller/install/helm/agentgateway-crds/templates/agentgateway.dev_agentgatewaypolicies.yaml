@@ -7193,7 +7193,7 @@ spec:
                         - type: string
                         description: |-
                           Maximum aggregate size of decoded HTTP/2
-                          request headers.
+                          request headers. Also limits HTTP/3 request headers.
                           If unset, this defaults to `16Ki`.
                         maxLength: 32
                         minLength: 1
@@ -7218,6 +7218,45 @@ spec:
                         - message: value must be at least 1 byte and fit within uint32
                           rule: (self >= 1 && self <= 4294967295) || self.size() >
                             0
+                      http3:
+                        description: |-
+                          Serve HTTP/3 (QUIC) on the UDP port matching each HTTPS listener of the
+                          targeted gateway/port, and advertise it to `HTTP/1.1` and `HTTP/2` clients
+                          with an `Alt-Svc` response header. Requests over HTTP/3 are routed and
+                          processed by the same policies as other HTTP versions.
+
+                          HTTP/3 is disabled when unset. Listeners that verify client certificates
+                          are not served over HTTP/3. The Service exposing the gateway must also
+                          expose the UDP port.
+                        properties:
+                          altSvcMaxAge:
+                            description: |-
+                              How long clients may cache the `Alt-Svc` advertisement.
+                              If unset, this defaults to 24 hours.
+                            maxLength: 32
+                            pattern: ^([0-9]{1,5}(h|m|s|ms)){1,4}$
+                            type: string
+                            x-kubernetes-validations:
+                            - message: altSvcMaxAge must be at least 1 second
+                              rule: duration(self) >= duration('1s')
+                          idleTimeout:
+                            description: |-
+                              How long an idle QUIC connection may stay open.
+                              If unset, this defaults to 30 seconds.
+                            maxLength: 32
+                            pattern: ^([0-9]{1,5}(h|m|s|ms)){1,4}$
+                            type: string
+                            x-kubernetes-validations:
+                            - message: idleTimeout must be at least 1 second
+                              rule: duration(self) >= duration('1s')
+                          maxConcurrentStreams:
+                            description: |-
+                              Maximum number of concurrent request streams per QUIC connection.
+                              If unset, this defaults to 100.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                        type: object
                       maxBufferSize:
                         anyOf:
                         - type: integer
@@ -7258,9 +7297,10 @@ spec:
                     x-kubernetes-validations:
                     - message: at least one of the fields in [http1HeaderCase http1IdleTimeout
                         http1MaxHeaders http2ConnectionWindowSize http2FrameSize http2KeepaliveInterval
-                        http2KeepaliveTimeout http2MaxHeaderSize http2WindowSize maxBufferSize
-                        maxConcurrentRequests maxConnectionDuration] must be set
-                      rule: '[has(self.http1HeaderCase),has(self.http1IdleTimeout),has(self.http1MaxHeaders),has(self.http2ConnectionWindowSize),has(self.http2FrameSize),has(self.http2KeepaliveInterval),has(self.http2KeepaliveTimeout),has(self.http2MaxHeaderSize),has(self.http2WindowSize),has(self.maxBufferSize),has(self.maxConcurrentRequests),has(self.maxConnectionDuration)].filter(x,x==true).size()
+                        http2KeepaliveTimeout http2MaxHeaderSize http2WindowSize http3
+                        maxBufferSize maxConcurrentRequests maxConnectionDuration]
+                        must be set
+                      rule: '[has(self.http1HeaderCase),has(self.http1IdleTimeout),has(self.http1MaxHeaders),has(self.http2ConnectionWindowSize),has(self.http2FrameSize),has(self.http2KeepaliveInterval),has(self.http2KeepaliveTimeout),has(self.http2MaxHeaderSize),has(self.http2WindowSize),has(self.http3),has(self.maxBufferSize),has(self.maxConcurrentRequests),has(self.maxConnectionDuration)].filter(x,x==true).size()
                         >= 1'
                   metrics:
                     description: |-

@@ -805,7 +805,7 @@ type FrontendHTTP struct {
 	// +optional
 	HTTP2FrameSize *ByteSize `json:"http2FrameSize,omitempty"`
 	// Maximum aggregate size of decoded HTTP/2
-	// request headers.
+	// request headers. Also limits HTTP/3 request headers.
 	// If unset, this defaults to `16Ki`.
 	// +optional
 	HTTP2MaxHeaderSize *ByteSize `json:"http2MaxHeaderSize,omitempty"`
@@ -831,6 +831,35 @@ type FrontendHTTP struct {
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	MaxConcurrentRequests *int32 `json:"maxConcurrentRequests,omitempty"`
+
+	// Serve HTTP/3 (QUIC) on the UDP port matching each HTTPS listener of the
+	// targeted gateway/port, and advertise it to `HTTP/1.1` and `HTTP/2` clients
+	// with an `Alt-Svc` response header. Requests over HTTP/3 are routed and
+	// processed by the same policies as other HTTP versions.
+	//
+	// HTTP/3 is disabled when unset. Listeners that verify client certificates
+	// are not served over HTTP/3. The Service exposing the gateway must also
+	// expose the UDP port.
+	// +optional
+	HTTP3 *FrontendHTTP3 `json:"http3,omitempty"`
+}
+
+type FrontendHTTP3 struct {
+	// How long clients may cache the `Alt-Svc` advertisement.
+	// If unset, this defaults to 24 hours.
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s')",message="altSvcMaxAge must be at least 1 second"
+	// +optional
+	AltSvcMaxAge *Duration `json:"altSvcMaxAge,omitempty"`
+	// How long an idle QUIC connection may stay open.
+	// If unset, this defaults to 30 seconds.
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s')",message="idleTimeout must be at least 1 second"
+	// +optional
+	IdleTimeout *Duration `json:"idleTimeout,omitempty"`
+	// Maximum number of concurrent request streams per QUIC connection.
+	// If unset, this defaults to 100.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MaxConcurrentStreams *int32 `json:"maxConcurrentStreams,omitempty"`
 }
 
 // +kubebuilder:validation:AtLeastOneFieldSet
