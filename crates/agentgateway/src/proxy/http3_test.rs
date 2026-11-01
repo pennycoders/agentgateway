@@ -538,6 +538,16 @@ async fn request_capacity_is_taken_after_headers() {
 		),
 		"{err:?}"
 	);
+	// The client is asked to stop sending the request with the same code (RFC 9114, section
+	// 4.1.1).
+	let stopped = tokio::time::timeout(Duration::from_secs(5), send.stopped())
+		.await
+		.expect("the client is asked to stop sending")
+		.unwrap();
+	assert_eq!(
+		stopped.map(quinn::VarInt::into_inner),
+		Some(Code::H3_REQUEST_REJECTED.value())
+	);
 	drop(t);
 }
 
@@ -1448,4 +1458,74 @@ fn replaced_supervisor_does_not_clear_its_successor() {
 	registry.set(&BIND_KEY, old, None);
 	registry.remove(&BIND_KEY, old);
 	assert!(registry.is_serving(&BIND_KEY, &LISTENER_KEY));
+}
+
+#[tokio::test]
+async fn requests_after_goaway_are_rejected() {
+	// The backend holds the first request, keeping the connection open while it drains.
+	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let backend = listener.local_addr().unwrap();
+	let (received_tx, received) = tokio::sync::oneshot::channel();
+	let (requests_tx, mut requests) = tokio::sync::mpsc::unbounded_channel();
+	tokio::spawn(async move {
+		let mut received_tx = Some(received_tx);
+		while let Ok((mut conn, _)) = listener.accept().await {
+			read_request_head(&mut conn).await;
+			let _ = requests_tx.send(());
+			if let Some(tx) = received_tx.take() {
+				let _ = tx.send(());
+			}
+			tokio::spawn(async move {
+				let mut buf = [0u8; 1024];
+				while conn.read(&mut buf).await.is_ok_and(|n| n > 0) {}
+			});
+		}
+	});
+	let (t, port) = serve_with_policy(backend, json!({ "http": { "http3": {} } })).await;
+	// The client never reads its control stream, so it does not learn about the GOAWAY and keeps
+	// opening requests, like a client whose request crossed the GOAWAY.
+	let endpoint = client_endpoint(client_tls("a.example.com").unwrap()).unwrap();
+	let conn = endpoint
+		.connect(SocketAddr::from(([127, 0, 0, 1], port)), "a.example.com")
+		.unwrap()
+		.await
+		.unwrap();
+	let (_driver, mut send) = h3::client::new(h3_quinn::Connection::new(conn))
+		.await
+		.unwrap();
+	let get = || {
+		::http::Request::builder()
+			.uri("https://a.example.com/")
+			.body(())
+			.unwrap()
+	};
+	let mut first = send.send_request(get()).await.unwrap();
+	first.finish().await.unwrap();
+	tokio::time::timeout(Duration::from_secs(5), received)
+		.await
+		.expect("the first request reaches the backend")
+		.unwrap();
+	requests.recv().await.unwrap();
+
+	// The listener changes: the connection sends a GOAWAY naming the next request stream.
+	let mut listener = https_listener(server_tls(None));
+	listener.hostname = strng::new("a.example.com");
+	t.pi
+		.stores
+		.binds
+		.write()
+		.insert_listener(listener, BIND_KEY);
+	tokio::time::sleep(Duration::from_millis(200)).await;
+
+	let mut second = send.send_request(get()).await.unwrap();
+	second.finish().await.unwrap();
+	let err = tokio::time::timeout(Duration::from_secs(5), second.recv_response())
+		.await
+		.expect("the request after the GOAWAY is rejected")
+		.expect_err("the request after the GOAWAY is not processed");
+	assert!(err.to_string().contains("H3_REQUEST_REJECTED"), "{err}");
+	assert!(
+		requests.try_recv().is_err(),
+		"the request after the GOAWAY reached the backend"
+	);
 }

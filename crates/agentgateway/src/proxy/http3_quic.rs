@@ -7,7 +7,9 @@
 //!   response (STOP_SENDING, RFC 9000 section 3.5) or acknowledged all of it, so cancelled requests
 //!   are not proxied to completion and connections are only closed once responses are delivered;
 //! - a response stream dropped before being finished can be reset instead of being finished (as
-//!   quinn does), so a truncated response is never presented as complete (RFC 9114 section 4.1).
+//!   quinn does), so a truncated response is never presented as complete (RFC 9114 section 4.1);
+//! - a request that is rejected or cancelled asks the client to stop sending it with the same error
+//!   code as the reset of its response (RFC 9114 section 4.1.1).
 
 use std::future::Future;
 use std::pin::Pin;
@@ -20,7 +22,6 @@ use futures_util::stream::{self, Stream, StreamExt};
 use h3::error::Code;
 use h3::quic::{self, ConnectionErrorIncoming, StreamErrorIncoming, StreamId, WriteBuf};
 use quinn::VarInt;
-use tokio_util::sync::ReusableBoxFuture;
 
 type BoxStream<T> = Pin<Box<dyn Stream<Item = T> + Send + Sync>>;
 
@@ -31,7 +32,17 @@ pub(super) type Stopped = Pin<Box<dyn Future<Output = Option<VarInt>> + Send + S
 /// Observes and controls one request stream while `h3` owns it.
 pub(super) struct StreamHandle {
 	pub(super) stopped: Stopped,
-	reset_code: Arc<AtomicU64>,
+	codes: Arc<StreamCodes>,
+}
+
+/// The error codes a request stream is terminated with when it is dropped. Zero means none.
+#[derive(Default)]
+struct StreamCodes {
+	/// Resets the response if it is not finished.
+	reset: AtomicU64,
+	/// Asks the client to stop sending the request if it is not received entirely. Otherwise
+	/// H3_NO_ERROR is used, as when the response is complete without the rest of the request.
+	stop: AtomicU64,
 }
 
 impl StreamHandle {
@@ -39,14 +50,22 @@ impl StreamHandle {
 	pub(super) fn detached() -> Self {
 		Self {
 			stopped: Box::pin(std::future::pending()),
-			reset_code: Default::default(),
+			codes: Default::default(),
 		}
 	}
 
 	/// Resets the response with `code` if it is dropped before being finished, instead of
 	/// finishing it, which would present a truncated response as complete.
 	pub(super) fn reset_on_drop(&self, code: Code) {
-		self.reset_code.store(code.value(), Ordering::Relaxed);
+		self.codes.reset.store(code.value(), Ordering::Relaxed);
+	}
+
+	/// Terminates both directions of the stream with `code` when it is dropped: the request is
+	/// rejected or cancelled, so the client must neither wait for the response nor keep sending
+	/// the request (RFC 9114 section 4.1.1).
+	pub(super) fn abort_on_drop(&self, code: Code) {
+		self.reset_on_drop(code);
+		self.codes.stop.store(code.value(), Ordering::Relaxed);
 	}
 }
 
@@ -104,10 +123,11 @@ impl<B: Buf> quic::Connection<B> for Connection {
 		let (send, recv) = ready!(self.incoming_bi.poll_next_unpin(cx))
 			.expect("the accept stream never ends")
 			.map_err(convert_connection_error)?;
-		let send = SendStream::new(send, self.streams.clone());
+		let codes = Arc::new(StreamCodes::default());
+		let send = SendStream::new(send, codes.clone(), &self.streams);
 		Poll::Ready(Ok(BidiStream {
 			send,
-			recv: RecvStream::new(recv),
+			recv: RecvStream::new(recv, codes),
 		}))
 	}
 
@@ -235,26 +255,21 @@ impl<B: Buf> quic::SendStream<B> for BidiStream<B> {
 
 /// The receiving half of a request stream.
 pub(super) struct RecvStream {
-	stream: Option<quinn::RecvStream>,
-	read_chunk_fut: ReusableBoxFuture<
-		'static,
-		(
-			quinn::RecvStream,
-			Result<Option<quinn::Chunk>, quinn::ReadError>,
-		),
-	>,
+	// Owned outside of any read future, so that dropping the stream while a read is pending still
+	// stops it with the intended error code.
+	stream: quinn::RecvStream,
 	id: StreamId,
 	finished: bool,
+	codes: Arc<StreamCodes>,
 }
 
 impl RecvStream {
-	fn new(stream: quinn::RecvStream) -> Self {
+	fn new(stream: quinn::RecvStream, codes: Arc<StreamCodes>) -> Self {
 		Self {
 			id: stream_id(stream.id()),
-			stream: Some(stream),
-			// Only allocates once the stream is first read.
-			read_chunk_fut: ReusableBoxFuture::new(async { unreachable!() }),
+			stream,
 			finished: false,
+			codes,
 		}
 	}
 }
@@ -266,15 +281,9 @@ impl quic::RecvStream for RecvStream {
 		&mut self,
 		cx: &mut task::Context<'_>,
 	) -> Poll<Result<Option<Self::Buf>, StreamErrorIncoming>> {
-		if let Some(mut stream) = self.stream.take() {
-			self.read_chunk_fut.set(async move {
-				let chunk = stream.read_chunk(usize::MAX, true).await;
-				(stream, chunk)
-			})
-		};
-		let (stream, chunk) = ready!(self.read_chunk_fut.poll(cx));
-		self.stream = Some(stream);
-		let chunk = chunk.map_err(convert_read_error)?;
+		// Reading a chunk is cancel-safe, so a pending read needs no state of its own.
+		let read = std::pin::pin!(self.stream.read_chunk(usize::MAX, true));
+		let chunk = ready!(read.poll(cx)).map_err(convert_read_error)?;
 		if chunk.is_none() {
 			self.finished = true;
 		}
@@ -282,9 +291,9 @@ impl quic::RecvStream for RecvStream {
 	}
 
 	fn stop_sending(&mut self, error_code: u64) {
-		if let Some(stream) = self.stream.as_mut() {
-			let _ = stream.stop(VarInt::from_u64(error_code).unwrap_or(VarInt::MAX));
-		}
+		let _ = self
+			.stream
+			.stop(VarInt::from_u64(error_code).unwrap_or(VarInt::MAX));
 		self.finished = true;
 	}
 
@@ -295,12 +304,15 @@ impl quic::RecvStream for RecvStream {
 
 impl Drop for RecvStream {
 	fn drop(&mut self) {
-		// The response is complete without the rest of the request; ask the client to stop sending
-		// it with H3_NO_ERROR (RFC 9114 section 4.1) rather than quinn's default code 0.
-		if !self.finished
-			&& let Some(stream) = self.stream.as_mut()
-		{
-			let _ = stream.stop(varint(Code::H3_NO_ERROR));
+		// Unless the request was rejected or cancelled, the response is complete without the rest
+		// of the request: ask the client to stop sending it with H3_NO_ERROR (RFC 9114 section 4.1)
+		// rather than quinn's default code 0.
+		if !self.finished {
+			let code = match self.codes.stop.load(Ordering::Relaxed) {
+				0 => varint(Code::H3_NO_ERROR),
+				code => VarInt::from_u64(code).unwrap_or(VarInt::MAX),
+			};
+			let _ = self.stream.stop(code);
 		}
 	}
 }
@@ -312,16 +324,16 @@ pub(super) struct SendStream<B: Buf> {
 	id: StreamId,
 	/// Set once the stream was finished or reset.
 	done: bool,
-	/// When non-zero, a stream dropped before being finished is reset with this code. Otherwise it
-	/// is finished, as `h3` expects for the error responses it sends itself (such as 431).
-	reset_code: Arc<AtomicU64>,
+	/// When the reset code is non-zero, a stream dropped before being finished is reset with it.
+	/// Otherwise it is finished, as `h3` expects for the error responses it sends itself (such as
+	/// 431).
+	codes: Arc<StreamCodes>,
 }
 
 impl<B: Buf> SendStream<B> {
-	fn new(stream: quinn::SendStream, streams: StreamRegistry) -> Self {
+	fn new(stream: quinn::SendStream, codes: Arc<StreamCodes>, streams: &StreamRegistry) -> Self {
 		let id = stream_id(stream.id());
 		let stopped = stream.stopped();
-		let reset_code = Arc::new(AtomicU64::new(0));
 		streams.accepted(StreamHandle {
 			stopped: Box::pin(async move {
 				match stopped.await {
@@ -330,14 +342,14 @@ impl<B: Buf> SendStream<B> {
 					Err(_) => Some(varint(Code::H3_REQUEST_CANCELLED)),
 				}
 			}),
-			reset_code: reset_code.clone(),
+			codes: codes.clone(),
 		});
 		Self {
 			stream,
 			writing: None,
 			id,
 			done: false,
-			reset_code,
+			codes,
 		}
 	}
 }
@@ -392,7 +404,7 @@ impl<B: Buf> quic::SendStream<B> for SendStream<B> {
 impl<B: Buf> Drop for SendStream<B> {
 	fn drop(&mut self) {
 		// quinn finishes a dropped stream, which would present a truncated response as complete.
-		let code = self.reset_code.load(Ordering::Relaxed);
+		let code = self.codes.reset.load(Ordering::Relaxed);
 		if !self.done && code != 0 {
 			let _ = self
 				.stream

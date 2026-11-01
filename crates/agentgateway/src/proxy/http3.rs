@@ -964,6 +964,8 @@ impl Connection {
 		tokio::pin!(gateway_drain);
 		// Held until the connection is done, so a gateway drain waits for it.
 		let mut drain_blocker = None;
+		// Set once a GOAWAY was sent. `h3.shutdown(1)` announces the stream after the last accepted
+		// one, so that every accepted request may still be processed (RFC 9114, section 5.2).
 		let mut draining = false;
 		let mut requests = JoinSet::new();
 		let connection_id = telemetry::current_connection_id();
@@ -1001,6 +1003,16 @@ impl Connection {
 					Ok(Some(resolver)) => {
 						// `h3` accepts one request stream per call, so this is the stream of `resolver`.
 						let handle = streams.take_accepted();
+						if draining {
+							// The GOAWAY announced that streams from the one after the last accepted
+							// stream on are not processed (RFC 9114, section 5.2), but `h3` still accepts
+							// that one. Reject it, so the client can safely retry it elsewhere.
+							if let Some(handle) = handle {
+								handle.abort_on_drop(Code::H3_REQUEST_REJECTED);
+							}
+							drop(resolver);
+							continue;
+						}
 						let serve = serve_request(requests_ctx.clone(), resolver, handle);
 						match connection_id {
 							Some(id) => requests.spawn(telemetry::connection_scope_with(id, serve)),
@@ -1067,8 +1079,8 @@ async fn serve_request(
 		_ = tokio::time::sleep(ctx.header_timeout) => {
 			debug!("timed out reading HTTP/3 request headers");
 			// Set before the stream is dropped with `resolve`. The request was not processed, so
-			// the client may retry it (RFC 9114, section 8.1).
-			handle.reset_on_drop(Code::H3_REQUEST_REJECTED);
+			// the client may retry it (RFC 9114, section 4.1.1).
+			handle.abort_on_drop(Code::H3_REQUEST_REJECTED);
 			return;
 		},
 	};
@@ -1076,6 +1088,15 @@ async fn serve_request(
 		Ok(r) => r,
 		Err(e) => {
 			debug!("failed to read HTTP/3 request: {e}");
+			return;
+		},
+	};
+	let content_length = match request_content_length(req.headers()) {
+		Ok(length) => length,
+		Err(e) => {
+			// Malformed requests are stream errors (RFC 9114, section 4.1.2).
+			debug!("malformed HTTP/3 request: {e}");
+			handle.abort_on_drop(Code::H3_MESSAGE_ERROR);
 			return;
 		},
 	};
@@ -1091,15 +1112,7 @@ async fn serve_request(
 		let _ = send_response(&mut send, response).await;
 		return;
 	};
-	let body = match RequestBody::new(recv, req.headers()) {
-		Ok(body) => body,
-		Err(e) => {
-			// Malformed requests are stream errors (RFC 9114, section 4.1.2).
-			debug!("malformed HTTP/3 request: {e}");
-			handle.reset_on_drop(Code::H3_MESSAGE_ERROR);
-			return;
-		},
-	};
+	let body = RequestBody::new(recv, content_length);
 	let mut req = req.map(|()| crate::http::Body::new(body));
 	if let Some(buffer) = ctx.buffer {
 		req.extensions_mut().insert(BufferLimit::new(buffer));
@@ -1115,7 +1128,7 @@ async fn serve_request(
 		response = response => response,
 		code = &mut handle.stopped => {
 			debug!(code=?code, "HTTP/3 request cancelled by the client");
-			handle.reset_on_drop(Code::H3_REQUEST_CANCELLED);
+			handle.abort_on_drop(Code::H3_REQUEST_CANCELLED);
 			return;
 		},
 	};
@@ -1203,19 +1216,22 @@ struct RequestBody {
 	remaining: Option<u64>,
 }
 
+/// The `content-length` of a request, which must be unambiguous.
+fn request_content_length(headers: &HeaderMap) -> anyhow::Result<Option<u64>> {
+	let mut lengths = headers.get_all(header::CONTENT_LENGTH).iter();
+	let Some(value) = lengths.next() else {
+		return Ok(None);
+	};
+	let length = parse_content_length(value)?;
+	if lengths.any(|other| parse_content_length(other).ok() != Some(length)) {
+		anyhow::bail!("conflicting content-length values");
+	}
+	Ok(Some(length))
+}
+
 impl RequestBody {
-	fn new(stream: H3RecvStream, headers: &HeaderMap) -> anyhow::Result<Self> {
-		let mut lengths = headers.get_all(header::CONTENT_LENGTH).iter();
-		let remaining = match lengths.next() {
-			None => None,
-			Some(value) => {
-				let length = parse_content_length(value)?;
-				if lengths.any(|other| parse_content_length(other).ok() != Some(length)) {
-					anyhow::bail!("conflicting content-length values");
-				}
-				Some(length)
-			},
-		};
+	/// `remaining` is the `content-length` of the request.
+	fn new(stream: H3RecvStream, remaining: Option<u64>) -> Self {
 		let mut body = Self {
 			stream,
 			buffered: None,
@@ -1225,7 +1241,7 @@ impl RequestBody {
 			remaining,
 		};
 		body.read_ahead();
-		Ok(body)
+		body
 	}
 
 	/// Reads what already arrived, without waiting, to learn whether the body is empty.
