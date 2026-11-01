@@ -39,6 +39,7 @@ spec:
         idleTimeout: 45s
         maxConcurrentStreams: 50
         altSvcPort: 443
+        requestHeaderTimeout: 10s
 ---
 apiVersion: agentgateway.dev/v1alpha1
 kind: AgentgatewayPolicy
@@ -86,6 +87,7 @@ output:
             altSvcPort: 443
             idleTimeout: 45s
             maxConcurrentStreams: 50
+            requestHeaderTimeout: 10s
       key: frontend/default/http3-policy:frontend-http:default/test
       name:
         kind: AgentgatewayPolicy

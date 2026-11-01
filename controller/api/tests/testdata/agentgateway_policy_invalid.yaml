@@ -352,6 +352,36 @@ spec:
       http3:
         idleTimeout: 500ms
 ---
+_err: 'http.http3.idleTimeout'
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: frontend-http3-idle-zero
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: dummy
+  frontend:
+    http:
+      http3:
+        idleTimeout: 0s
+---
+_err: 'http.http3.requestHeaderTimeout'
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: frontend-http3-header-timeout-short
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: dummy
+  frontend:
+    http:
+      http3:
+        requestHeaderTimeout: 500ms
+---
 _err: 'http.http3.altSvcMaxAge'
 apiVersion: agentgateway.dev/v1alpha1
 kind: AgentgatewayPolicy

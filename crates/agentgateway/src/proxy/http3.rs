@@ -1034,11 +1034,7 @@ impl Connection {
 		let connection = Arc::new(ext);
 
 		let http = policies.http.clone().unwrap_or_default();
-		let idle_timeout = http
-			.http3
-			.as_ref()
-			.map(frontend::HTTP3::idle_timeout)
-			.unwrap_or(frontend::HTTP3::DEFAULT_IDLE_TIMEOUT);
+		let settings = http.http3.clone().unwrap_or_default();
 		let requests_ctx = Arc::new(RequestContext {
 			proxy: HTTPProxy {
 				bind_name: bind_key.clone(),
@@ -1048,9 +1044,8 @@ impl Connection {
 			},
 			connection,
 			buffer: http.max_buffer_size,
-			// Bounds header reads like `header_read_timeout` on the TCP listener's HTTP/1 server.
-			header_timeout: http.http1_idle_timeout,
-			idle_timeout,
+			header_timeout: settings.request_header_timeout(),
+			idle_timeout: settings.idle_timeout(),
 			max_requests: http.max_concurrent_requests,
 			admission,
 			request_shed: pi

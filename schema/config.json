@@ -10871,7 +10871,7 @@
           "default": null
         },
         "idleTimeout": {
-          "description": "How long an idle QUIC connection may stay open. Defaults to 30 seconds.",
+          "description": "How long an idle QUIC connection may stay open. Defaults to 30 seconds. Must not be zero.",
           "type": [
             "string",
             "null"
@@ -10897,6 +10897,14 @@
           "format": "uint16",
           "minimum": 1,
           "maximum": 65535,
+          "default": null
+        },
+        "requestHeaderTimeout": {
+          "description": "How long a client may take to send the headers of a request on a new request stream\nbefore the request is rejected. Defaults to 30 seconds. Must not be zero.",
+          "type": [
+            "string",
+            "null"
+          ],
           "default": null
         }
       },

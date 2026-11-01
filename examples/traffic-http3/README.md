@@ -39,11 +39,13 @@ hello
 Note the `-k` to disable TLS verification, as the example certificate is self-signed.
 
 HTTP/3 is only served for HTTPS listeners that do not verify client certificates, and it requires TLS 1.3.
+One QUIC endpoint serves every HTTPS listener of the bind with the TLS settings of the frontend `tls` policy, so listeners whose own TLS versions, cipher suites or key exchange groups differ are not served over HTTP/3.
 It is not served on binds that use the PROXY protocol, a CONNECT tunnel, or another tunnel protocol, since these change the TCP stream before HTTP and have no QUIC equivalent.
-The `idleTimeout` and `maxConcurrentStreams` fields tune the QUIC connections; the HTTP/2 flow-control windows (`http2WindowSize`, `http2ConnectionWindowSize`) also bound QUIC flow control.
+The `idleTimeout`, `maxConcurrentStreams` and `requestHeaderTimeout` fields tune the QUIC connections; the HTTP/2 flow-control windows (`http2WindowSize`, `http2ConnectionWindowSize`) also bound QUIC flow control.
 
 When HTTP/3 is disabled again, responses carry `Alt-Svc: clear` for the advertised `altSvcMaxAge`, so clients forget the cached advertisement.
 
 The UDP port must be reachable by clients.
 On Kubernetes, the controller adds a UDP port to the Service of the Gateways it deploys for every HTTPS listener on which an `AgentgatewayPolicy` enables HTTP/3.
+A `LoadBalancer` Service then has both TCP and UDP ports, which some load balancer implementations do not support; in that case, expose the UDP port with a separate Service.
 When clients reach the gateway on a different port, for example through NAT or a load balancer that remaps ports, set `altSvcPort` to the port they should use.

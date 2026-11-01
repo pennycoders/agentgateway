@@ -837,10 +837,17 @@ type FrontendHTTP struct {
 	// with an `Alt-Svc` response header. Requests over HTTP/3 are routed and
 	// processed by the same policies as other HTTP versions.
 	//
-	// HTTP/3 is disabled when unset. Listeners that verify client certificates
-	// are not served over HTTP/3. For Gateways it deploys, the controller
-	// exposes the UDP port of each targeted HTTPS listener on the Service;
-	// otherwise, the UDP port must be exposed to clients separately.
+	// HTTP/3 is disabled when unset. Listeners that verify client certificates,
+	// or whose own TLS versions, cipher suites or key exchange groups differ
+	// from those of the frontend TLS policy, are not served over HTTP/3.
+	//
+	// For Gateways it deploys, the controller exposes the UDP port of each
+	// targeted HTTPS listener on the Service, next to its TCP port; otherwise,
+	// the UDP port must be exposed to clients separately. A `LoadBalancer`
+	// Service then has both TCP and UDP ports, which some load balancer
+	// implementations do not support: they may reject the Service or not
+	// provision the UDP ports. In that case, expose the UDP port with a
+	// separate Service and set `altSvcPort` if its port differs.
 	// +optional
 	HTTP3 *FrontendHTTP3 `json:"http3,omitempty"`
 }
@@ -870,6 +877,12 @@ type FrontendHTTP3 struct {
 	// +kubebuilder:validation:Maximum=65535
 	// +optional
 	AltSvcPort *int32 `json:"altSvcPort,omitempty"`
+	// How long a client may take to send the headers of a request on a new
+	// request stream before the request is rejected.
+	// If unset, this defaults to 30 seconds.
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s')",message="requestHeaderTimeout must be at least 1 second"
+	// +optional
+	RequestHeaderTimeout *Duration `json:"requestHeaderTimeout,omitempty"`
 }
 
 // +kubebuilder:validation:AtLeastOneFieldSet

@@ -1597,9 +1597,10 @@
 |`frontendPolicies.http.maxConcurrentRequests`|integer|Maximum number of in-flight HTTP requests across this bind. This includes HTTP/1 requests<br>and HTTP/2 streams. Requests over the limit are rejected immediately.|
 |`frontendPolicies.http.http3`|object|Serve HTTP/3 (QUIC) on the UDP port matching each HTTPS listener of this bind, and advertise<br>it to HTTP/1.1 and HTTP/2 clients with an `Alt-Svc` response header. Disabled when unset.<br>Listeners that verify client certificates, or whose own TLS versions, cipher suites or key<br>exchange groups differ from those of the frontend TLS policy, are not served over HTTP/3.|
 |`frontendPolicies.http.http3.altSvcMaxAge`|string|How long clients may cache the `Alt-Svc` advertisement (the `ma` parameter).<br>Defaults to 24 hours.|
-|`frontendPolicies.http.http3.idleTimeout`|string|How long an idle QUIC connection may stay open. Defaults to 30 seconds.|
+|`frontendPolicies.http.http3.idleTimeout`|string|How long an idle QUIC connection may stay open. Defaults to 30 seconds. Must not be zero.|
 |`frontendPolicies.http.http3.maxConcurrentStreams`|integer|Maximum number of concurrent request streams per QUIC connection. Defaults to 100.|
 |`frontendPolicies.http.http3.altSvcPort`|integer|UDP port advertised in `Alt-Svc`, when clients reach the QUIC endpoint on a different port<br>than the one it listens on, for example behind NAT or a load balancer. Defaults to the<br>port of the bind.|
+|`frontendPolicies.http.http3.requestHeaderTimeout`|string|How long a client may take to send the headers of a request on a new request stream<br>before the request is rejected. Defaults to 30 seconds. Must not be zero.|
 |`frontendPolicies.tls`|object|Settings for handling incoming TLS connections.|
 |`frontendPolicies.tls.handshakeTimeout`|string|Maximum time allowed to complete the downstream TLS handshake.|
 |`frontendPolicies.tls.alpn`|array|ALPN protocols advertised to downstream clients.|

@@ -120,8 +120,11 @@ pub struct HTTP3 {
 	#[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
 	#[serde(default)]
 	pub alt_svc_max_age: Option<Duration>,
-	/// How long an idle QUIC connection may stay open. Defaults to 30 seconds.
-	#[serde(with = "serde_dur_option")]
+	/// How long an idle QUIC connection may stay open. Defaults to 30 seconds. Must not be zero.
+	#[serde(
+		serialize_with = "serde_dur_option::serialize",
+		deserialize_with = "deserialize_nonzero_duration"
+	)]
 	#[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
 	#[serde(default)]
 	pub idle_timeout: Option<Duration>,
@@ -133,12 +136,33 @@ pub struct HTTP3 {
 	/// port of the bind.
 	#[serde(default)]
 	pub alt_svc_port: Option<NonZeroU16>,
+	/// How long a client may take to send the headers of a request on a new request stream
+	/// before the request is rejected. Defaults to 30 seconds. Must not be zero.
+	#[serde(
+		serialize_with = "serde_dur_option::serialize",
+		deserialize_with = "deserialize_nonzero_duration"
+	)]
+	#[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
+	#[serde(default)]
+	pub request_header_timeout: Option<Duration>,
+}
+
+fn deserialize_nonzero_duration<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
+where
+	D: serde::Deserializer<'de>,
+{
+	let duration = serde_dur_option::deserialize(deserializer)?;
+	if duration.is_some_and(|d| d.is_zero()) {
+		return Err(serde::de::Error::custom("duration must not be zero"));
+	}
+	Ok(duration)
 }
 
 impl HTTP3 {
 	pub const DEFAULT_ALT_SVC_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 	pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 	pub const DEFAULT_MAX_CONCURRENT_STREAMS: NonZeroU32 = NonZeroU32::new(100).unwrap();
+	pub const DEFAULT_REQUEST_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 
 	pub fn alt_svc_max_age(&self) -> Duration {
 		self
@@ -148,6 +172,12 @@ impl HTTP3 {
 
 	pub fn idle_timeout(&self) -> Duration {
 		self.idle_timeout.unwrap_or(Self::DEFAULT_IDLE_TIMEOUT)
+	}
+
+	pub fn request_header_timeout(&self) -> Duration {
+		self
+			.request_header_timeout
+			.unwrap_or(Self::DEFAULT_REQUEST_HEADER_TIMEOUT)
 	}
 
 	pub fn max_concurrent_streams(&self) -> NonZeroU32 {

@@ -3564,9 +3564,19 @@ fn frontend_policy_from_proto(
 				.http3
 				.as_ref()
 				.map(|h3| {
+					let nonzero = |field: &str, d: Option<prost_types::Duration>| {
+						let d = d.map(convert_duration);
+						if d.is_some_and(|d| d.is_zero()) {
+							return Err(ProtoError::Generic(format!(
+								"http3 {field} must not be zero"
+							)));
+						}
+						Ok(d)
+					};
 					Ok::<_, ProtoError>(frontend::HTTP3 {
 						alt_svc_max_age: h3.alt_svc_max_age.map(convert_duration),
-						idle_timeout: h3.idle_timeout.map(convert_duration),
+						idle_timeout: nonzero("idleTimeout", h3.idle_timeout)?,
+						request_header_timeout: nonzero("requestHeaderTimeout", h3.request_header_timeout)?,
 						max_concurrent_streams: h3
 							.max_concurrent_streams
 							.and_then(std::num::NonZeroU32::new),
@@ -6620,6 +6630,10 @@ mod tests {
 			}),
 			max_concurrent_streams: Some(50),
 			alt_svc_port: Some(8443),
+			request_header_timeout: Some(prost_types::Duration {
+				seconds: 5,
+				nanos: 0,
+			}),
 		}));
 		let FrontendPolicy::HTTP(enabled) = frontend_policy_from_proto(&spec, &mut diag)? else {
 			panic!("Expected HTTP policy variant");
@@ -6631,6 +6645,7 @@ mod tests {
 				idle_timeout: Some(Duration::from_secs(10)),
 				max_concurrent_streams: std::num::NonZeroU32::new(50),
 				alt_svc_port: std::num::NonZeroU16::new(8443),
+				request_header_timeout: Some(Duration::from_secs(5)),
 			})
 		);
 
@@ -6642,6 +6657,20 @@ mod tests {
 			defaults.http3,
 			Some(crate::types::frontend::HTTP3::default())
 		);
+
+		// QUIC treats a zero idle timeout as no idle timeout at all.
+		for spec in [
+			fps::http::Http3 {
+				idle_timeout: Some(prost_types::Duration::default()),
+				..Default::default()
+			},
+			fps::http::Http3 {
+				request_header_timeout: Some(prost_types::Duration::default()),
+				..Default::default()
+			},
+		] {
+			assert!(frontend_policy_from_proto(&http(Some(spec)), &mut diag).is_err());
+		}
 		Ok(())
 	}
 

@@ -522,7 +522,7 @@ async fn request_capacity_is_taken_after_headers() {
 	let mock = simple_mock().await;
 	let (t, port) = serve_with_policy(
 		*mock.address(),
-		json!({ "http": { "http3": {}, "maxConcurrentRequests": 1, "http1IdleTimeout": "1s" } }),
+		json!({ "http": { "http3": { "requestHeaderTimeout": "1s" }, "maxConcurrentRequests": 1 } }),
 	)
 	.await;
 	let mut client = connect(port, "a.example.com").await;
@@ -1177,10 +1177,11 @@ fn connection_headers_are_stripped() {
 #[test]
 fn local_config_parses_http3() {
 	let http: frontend::HTTP = serde_json::from_value(json!({
-		"http3": {"altSvcMaxAge": "10m", "idleTimeout": "1m", "maxConcurrentStreams": 10, "altSvcPort": 443}
+		"http3": {"altSvcMaxAge": "10m", "idleTimeout": "1m", "maxConcurrentStreams": 10, "altSvcPort": 443, "requestHeaderTimeout": "5s"}
 	}))
 	.unwrap();
 	let http3 = http.http3.unwrap();
+	assert_eq!(http3.request_header_timeout(), Duration::from_secs(5));
 	assert_eq!(http3.alt_svc_max_age(), Duration::from_secs(600));
 	assert_eq!(http3.idle_timeout(), Duration::from_secs(60));
 	assert_eq!(http3.max_concurrent_streams().get(), 10);
@@ -1198,6 +1199,10 @@ fn local_config_parses_http3() {
 		frontend::HTTP3::DEFAULT_MAX_CONCURRENT_STREAMS
 	);
 	assert_eq!(http3.alt_svc_port, None);
+	assert_eq!(
+		http3.request_header_timeout(),
+		frontend::HTTP3::DEFAULT_REQUEST_HEADER_TIMEOUT
+	);
 
 	let http: frontend::HTTP = serde_json::from_value(json!({})).unwrap();
 	assert!(http.http3.is_none());
@@ -1208,6 +1213,14 @@ fn local_config_parses_http3() {
 			.is_err()
 	);
 	assert!(serde_json::from_value::<frontend::HTTP>(json!({"http3": {"altSvcPort": 0}})).is_err());
+	// QUIC treats a zero idle timeout as no idle timeout at all.
+	assert!(
+		serde_json::from_value::<frontend::HTTP>(json!({"http3": {"idleTimeout": "0s"}})).is_err()
+	);
+	assert!(
+		serde_json::from_value::<frontend::HTTP>(json!({"http3": {"requestHeaderTimeout": "0s"}}))
+			.is_err()
+	);
 }
 
 #[test]

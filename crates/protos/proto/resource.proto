@@ -774,7 +774,8 @@ message FrontendPolicySpec {
     message HTTP3 {
       // How long clients may cache the Alt-Svc advertisement. Defaults to 24h.
       google.protobuf.Duration alt_svc_max_age = 1;
-      // How long an idle QUIC connection may stay open. Defaults to 30s.
+      // How long an idle QUIC connection may stay open. Defaults to 30s. Must not
+      // be zero.
       google.protobuf.Duration idle_timeout = 2;
       // Maximum concurrent request streams per QUIC connection. Defaults to 100.
       optional uint32 max_concurrent_streams = 3;
@@ -782,6 +783,9 @@ message FrontendPolicySpec {
       // different port than the one it listens on (NAT, load balancer). Defaults
       // to the port of the bind.
       optional uint32 alt_svc_port = 4;
+      // How long a client may take to send the headers of a request on a new
+      // request stream. Defaults to 30s.
+      google.protobuf.Duration request_header_timeout = 5;
     }
     // Serve HTTP/3 (QUIC) on the UDP port matching each HTTPS listener of the bind,
     // and advertise it with Alt-Svc. Unset disables HTTP/3.
