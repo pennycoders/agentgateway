@@ -23,6 +23,7 @@ use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tokio::task::{AbortHandle, JoinSet};
 use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, event, info, info_span, warn};
 
 use crate::http::substrate::{self, ActorIdentity, EgressTlsMode};
@@ -177,7 +178,8 @@ impl Gateway {
 		};
 		let mut active: HashMap<BindKey, ActiveBind> = HashMap::new();
 		// One HTTP/3 supervisor per bind; it stays idle (no UDP socket) unless HTTP/3 is enabled.
-		let mut active_http3: HashMap<BindKey, AbortHandle> = HashMap::new();
+		// Cancelling it stops accepting connections and lets the existing ones drain.
+		let mut active_http3: HashMap<BindKey, CancellationToken> = HashMap::new();
 		let mut handle_bind = |js: &mut JoinSet<anyhow::Result<()>>, b: BindEvent| {
 			let (bind_key, bind, listeners) = match b {
 				BindEvent::Add(bind, listeners) => (bind.key.clone(), bind, listeners),
@@ -191,8 +193,8 @@ impl Gateway {
 					if let Some(h) = active.remove(&bind_key) {
 						h.stop();
 					}
-					if let Some(h) = active_http3.remove(&bind_key) {
-						h.abort();
+					if let Some(stop) = active_http3.remove(&bind_key) {
+						stop.cancel();
 					}
 					return;
 				},
@@ -200,14 +202,20 @@ impl Gateway {
 			if let Some(h) = active.remove(&bind_key) {
 				h.stop();
 			}
-			if let Some(h) = active_http3.remove(&bind_key) {
-				h.abort();
+			if let Some(stop) = active_http3.remove(&bind_key) {
+				stop.cancel();
 			}
-			let http3 = js.spawn(
-				super::http3::run_bind(self.pi.clone(), subdrain.clone(), bind_key.clone())
-					.in_current_span(),
+			let stop = CancellationToken::new();
+			js.spawn(
+				super::http3::run_bind(
+					self.pi.clone(),
+					subdrain.clone(),
+					bind_key.clone(),
+					stop.clone(),
+				)
+				.in_current_span(),
 			);
-			active_http3.insert(bind_key.clone(), http3);
+			active_http3.insert(bind_key.clone(), stop);
 			let (config, config_rx) = watch::channel(Arc::new(bind));
 
 			debug!("add bind {}", config.borrow().address);

@@ -1462,14 +1462,24 @@ impl TestBind {
 
 	/// Runs the HTTP/3 endpoint of the bind, as the gateway does for every bind. It only binds a UDP
 	/// socket, on the bind's port, once a frontend policy enables HTTP/3.
-	pub fn serve_http3(&self, bind_name: BindKey) {
+	pub fn serve_http3(&self, bind_name: BindKey) -> tokio::task::JoinHandle<()> {
+		self.serve_http3_until(bind_name, Default::default())
+	}
+
+	/// Serves the HTTP/3 endpoint of the bind until `stop` is cancelled, like when the bind is
+	/// removed.
+	pub fn serve_http3_until(
+		&self,
+		bind_name: BindKey,
+		stop: tokio_util::sync::CancellationToken,
+	) -> tokio::task::JoinHandle<()> {
 		let pi = self.pi.clone();
 		let drain = self.drain_rx.clone();
 		tokio::spawn(async move {
-			crate::proxy::http3::run_bind(pi, drain, bind_name)
+			crate::proxy::http3::run_bind(pi, drain, bind_name, stop)
 				.await
 				.unwrap();
-		});
+		})
 	}
 
 	pub async fn serve_gateway_listener(&self, bind_name: BindKey) -> SocketAddr {

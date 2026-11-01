@@ -37,6 +37,7 @@ use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::Gateway;
@@ -157,6 +158,11 @@ impl Http3Registry {
 	fn set(&self, bind: &BindKey, owner: u64, advertisement: Option<Advertisement>) {
 		let mut binds = self.binds.write().expect("http3 registry poisoned");
 		let entry = binds.entry(bind.clone()).or_default();
+		// A supervisor that is still draining after the bind was replaced must not override its
+		// successor, which has a larger id.
+		if entry.owner > owner {
+			return;
+		}
 		entry.owner = owner;
 		let now = Instant::now();
 		if let Some(old) = entry.serving.take() {
@@ -505,10 +511,15 @@ impl Drop for RegistryGuard {
 }
 
 /// Runs the HTTP/3 endpoint of a bind for as long as the bind exists.
+///
+/// Cancelling `stop`, when the bind is removed or replaced, stops accepting connections and asks
+/// the existing ones to finish, like TCP connections whose listener is gone. The UDP socket is
+/// released once they are done, or after the termination deadline.
 pub(crate) async fn run_bind(
 	pi: Arc<ProxyInputs>,
 	drain: DrainWatcher,
 	bind_key: BindKey,
+	stop: CancellationToken,
 ) -> anyhow::Result<()> {
 	let min_deadline = pi.cfg.termination_min_deadline;
 	let max_deadline = pi.cfg.termination_max_deadline;
@@ -540,7 +551,7 @@ pub(crate) async fn run_bind(
 		max_deadline,
 		min_deadline,
 		|drain, force_shutdown| async move {
-			supervise(pi, drain, force_shutdown, bind_key, owner).await;
+			supervise(pi, drain, force_shutdown, bind_key, owner, stop).await;
 		},
 	)
 	.await;
@@ -553,6 +564,7 @@ async fn supervise(
 	force_shutdown: watch::Receiver<()>,
 	bind_key: BindKey,
 	owner: u64,
+	stop: CancellationToken,
 ) {
 	let wait = drain.clone().wait_for_drain();
 	tokio::pin!(wait);
@@ -598,16 +610,17 @@ async fn supervise(
 			};
 			let retired = endpoint.as_ref().is_some_and(|e| !e.serving);
 			tokio::select! {
-				res = &mut wait => break 'outer res,
+				res = &mut wait => break 'outer Some(res),
+				_ = stop.cancelled() => break 'outer None,
 				res = listener_changes.changed() => {
 					if res.is_err() {
-						break 'outer (&mut wait).await;
+						break 'outer Some((&mut wait).await);
 					}
 					break;
 				},
 				res = policy_changes.changed() => {
 					if res.is_err() {
-						break 'outer (&mut wait).await;
+						break 'outer Some((&mut wait).await);
 					}
 					break;
 				},
@@ -675,6 +688,23 @@ async fn supervise(
 		}
 	};
 	pi.http3.set(&bind_key, owner, None);
+	let Some(drain_mode) = drain_mode else {
+		// The bind was removed or replaced. Its connections are asked to finish; returning would
+		// force them to shut down, and dropping the endpoint would close them.
+		if let Some(mut e) = endpoint {
+			if e.serving {
+				info!(bind=%bind_key, "bind removed, draining HTTP/3 connections");
+			}
+			e.retire();
+			if tokio::time::timeout(pi.cfg.termination_max_deadline, e.endpoint.wait_idle())
+				.await
+				.is_err()
+			{
+				warn!(bind=%bind_key, "HTTP/3 connections did not finish in time, closing them");
+			}
+		}
+		return;
+	};
 	if let Some(e) = endpoint.as_ref() {
 		// Stop accepting; the connections watch their drain handles and finish on their own.
 		e.endpoint.set_server_config(None);

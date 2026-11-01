@@ -1377,3 +1377,75 @@ async fn listener_requiring_client_certificates_during_the_handshake_is_not_serv
 	assert!(res.is_err(), "served without a client certificate: {res:?}");
 	assert!(t.pi.http3.is_serving(&BIND_KEY, &strng::new("other")));
 }
+
+#[tokio::test]
+async fn removing_the_bind_drains_connections() {
+	const SIZE: usize = 8 * 1024 * 1024;
+	let mock = wiremock::MockServer::start().await;
+	wiremock::Mock::given(wiremock::matchers::any())
+		.respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(vec![b'x'; SIZE]))
+		.mount(&mock)
+		.await;
+	let port = free_udp_port();
+	let mut t = test_with(*mock.address(), https_bind(port, server_tls(None)));
+	t.attach_frontend_policy(json!({ "http": { "http3": {} } }))
+		.await;
+	let stop = tokio_util::sync::CancellationToken::new();
+	let supervisor = t.serve_http3_until(BIND_KEY, stop.clone());
+	wait_for_http3(&t, true).await;
+	let mut client = connect(port, "a.example.com").await;
+	let req = ::http::Request::builder()
+		.uri("https://a.example.com/large")
+		.body(())
+		.unwrap();
+	let mut stream = client.send.send_request(req).await.unwrap();
+	stream.finish().await.unwrap();
+	assert_eq!(
+		stream.recv_response().await.unwrap().status(),
+		StatusCode::OK
+	);
+	let mut received = stream
+		.recv_data()
+		.await
+		.unwrap()
+		.map(|c| c.remaining())
+		.unwrap_or_default();
+
+	// The bind goes away while most of the response is still in flight: like on the TCP listener,
+	// the response is delivered and the connection is asked to go away.
+	let reader = tokio::spawn(async move {
+		while let Some(chunk) = stream.recv_data().await.unwrap() {
+			received += chunk.remaining();
+		}
+		received
+	});
+	stop.cancel();
+	wait_for_http3(&t, false).await;
+	assert!(try_connect(port, "a.example.com").await.is_err());
+	assert_eq!(reader.await.unwrap(), SIZE);
+	expect_graceful_close(client).await;
+	// The UDP socket is released once the connection is gone.
+	tokio::time::timeout(Duration::from_secs(10), supervisor)
+		.await
+		.expect("the supervisor ends")
+		.unwrap();
+	std::net::UdpSocket::bind(("127.0.0.1", port)).expect("the UDP port is released");
+}
+
+#[test]
+fn replaced_supervisor_does_not_clear_its_successor() {
+	let registry = Http3Registry::default();
+	let advertisement = || Advertisement {
+		listeners: [LISTENER_KEY].into_iter().collect(),
+		alt_svc: alt_svc_value(443, Duration::from_secs(60)),
+		max_age: Duration::from_secs(60),
+	};
+	let old = registry.owner();
+	let new = registry.owner();
+	registry.set(&BIND_KEY, old, Some(advertisement()));
+	registry.set(&BIND_KEY, new, Some(advertisement()));
+	// The replaced supervisor stops serving while it drains its connections.
+	registry.set(&BIND_KEY, old, None);
+	registry.remove(&BIND_KEY, old);
+	assert!(registry.is_serving(&BIND_KEY, &LISTENER_KEY));
+}
