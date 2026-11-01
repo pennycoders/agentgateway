@@ -1,4 +1,4 @@
-use std::num::NonZeroU32;
+use std::num::{NonZeroU16, NonZeroU32};
 use std::time::Duration;
 
 use frozen_collections::{FzHashSet, Len};
@@ -126,13 +126,18 @@ pub struct HTTP3 {
 	pub idle_timeout: Option<Duration>,
 	/// Maximum number of concurrent request streams per QUIC connection. Defaults to 100.
 	#[serde(default)]
-	pub max_concurrent_streams: Option<u32>,
+	pub max_concurrent_streams: Option<NonZeroU32>,
+	/// UDP port advertised in `Alt-Svc`, when clients reach the QUIC endpoint on a different port
+	/// than the one it listens on, for example behind NAT or a load balancer. Defaults to the
+	/// port of the bind.
+	#[serde(default)]
+	pub alt_svc_port: Option<NonZeroU16>,
 }
 
 impl HTTP3 {
 	pub const DEFAULT_ALT_SVC_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 	pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-	pub const DEFAULT_MAX_CONCURRENT_STREAMS: u32 = 100;
+	pub const DEFAULT_MAX_CONCURRENT_STREAMS: NonZeroU32 = NonZeroU32::new(100).unwrap();
 
 	pub fn alt_svc_max_age(&self) -> Duration {
 		self
@@ -144,7 +149,7 @@ impl HTTP3 {
 		self.idle_timeout.unwrap_or(Self::DEFAULT_IDLE_TIMEOUT)
 	}
 
-	pub fn max_concurrent_streams(&self) -> u32 {
+	pub fn max_concurrent_streams(&self) -> NonZeroU32 {
 		self
 			.max_concurrent_streams
 			.unwrap_or(Self::DEFAULT_MAX_CONCURRENT_STREAMS)

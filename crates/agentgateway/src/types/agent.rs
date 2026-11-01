@@ -839,6 +839,8 @@ pub enum BindMode {
 pub enum TransportProtocol {
 	http,
 	https,
+	/// HTTP/3 over QUIC.
+	http3,
 	hbone,
 	tcp,
 	tls,

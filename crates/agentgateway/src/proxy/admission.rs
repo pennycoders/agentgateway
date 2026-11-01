@@ -51,8 +51,13 @@ impl Limiter {
 		})
 	}
 
-	#[cfg(test)]
-	fn active(&self) -> usize {
+	/// Whether capacity is currently available, without reserving it.
+	pub fn has_capacity(&self, limit: Option<NonZeroU32>) -> bool {
+		limit.is_none_or(|limit| self.active() < limit.get() as usize)
+	}
+
+	/// The capacity currently reserved.
+	pub fn active(&self) -> usize {
 		self.active.load(Ordering::Acquire)
 	}
 }

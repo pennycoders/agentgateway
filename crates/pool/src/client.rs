@@ -217,10 +217,11 @@ where
 		let mut req = Request::from_parts(parts, body);
 
 		if pooled.is_http1() {
-			if req.version() == Version::HTTP_2 {
-				// This means we negotiated down in ALPN
+			if matches!(req.version(), Version::HTTP_2 | Version::HTTP_3) {
+				// This means we negotiated down in ALPN, or the request came in over HTTP/3, which is
+				// never used upstream.
+				trace!(version=?req.version(), "Connection is HTTP/1, but request was not");
 				*req.version_mut() = Version::HTTP_11;
-				trace!("Connection is HTTP/1, but request was HTTP/2");
 			}
 			if req.version() == Version::HTTP_11 && req.headers().contains_key(TRAILER) {
 				// HTTP/2 permits Content-Length alongside trailers, but HTTP/1 requires

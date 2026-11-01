@@ -11563,8 +11563,12 @@ type FrontendPolicySpec_HTTP_HTTP3 struct {
 	IdleTimeout *durationpb.Duration `protobuf:"bytes,2,opt,name=idle_timeout,json=idleTimeout,proto3" json:"idle_timeout,omitempty"`
 	// Maximum concurrent request streams per QUIC connection. Defaults to 100.
 	MaxConcurrentStreams *uint32 `protobuf:"varint,3,opt,name=max_concurrent_streams,json=maxConcurrentStreams,proto3,oneof" json:"max_concurrent_streams,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// UDP port advertised in Alt-Svc, when clients reach the QUIC endpoint on a
+	// different port than the one it listens on (NAT, load balancer). Defaults
+	// to the port of the bind.
+	AltSvcPort    *uint32 `protobuf:"varint,4,opt,name=alt_svc_port,json=altSvcPort,proto3,oneof" json:"alt_svc_port,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *FrontendPolicySpec_HTTP_HTTP3) Reset() {
@@ -11614,6 +11618,13 @@ func (x *FrontendPolicySpec_HTTP_HTTP3) GetIdleTimeout() *durationpb.Duration {
 func (x *FrontendPolicySpec_HTTP_HTTP3) GetMaxConcurrentStreams() uint32 {
 	if x != nil && x.MaxConcurrentStreams != nil {
 		return *x.MaxConcurrentStreams
+	}
+	return 0
+}
+
+func (x *FrontendPolicySpec_HTTP_HTTP3) GetAltSvcPort() uint32 {
+	if x != nil && x.AltSvcPort != nil {
+		return *x.AltSvcPort
 	}
 	return 0
 }
@@ -19083,7 +19094,7 @@ const file_resource_proto_rawDesc = "" +
 	"\binterval\x18\x02 \x01(\v2\x19.google.protobuf.DurationR\binterval\x12\x1d\n" +
 	"\aretries\x18\x03 \x01(\rH\x00R\aretries\x88\x01\x01B\n" +
 	"\n" +
-	"\b_retries\"\xe3*\n" +
+	"\b_retries\"\x9b+\n" +
 	"\x12FrontendPolicySpec\x12E\n" +
 	"\x03tcp\x18\x01 \x01(\v21.agentgateway.dev.resource.FrontendPolicySpec.TCPH\x00R\x03tcp\x12E\n" +
 	"\x03tls\x18\x02 \x01(\v21.agentgateway.dev.resource.FrontendPolicySpec.TLSH\x00R\x03tls\x12H\n" +
@@ -19093,7 +19104,7 @@ const file_resource_proto_rawDesc = "" +
 	"\x15network_authorization\x18\x06 \x01(\v2B.agentgateway.dev.resource.FrontendPolicySpec.NetworkAuthorizationH\x00R\x14networkAuthorization\x12d\n" +
 	"\x0eproxy_protocol\x18\a \x01(\v2;.agentgateway.dev.resource.FrontendPolicySpec.ProxyProtocolH\x00R\rproxyProtocol\x12Q\n" +
 	"\ametrics\x18\b \x01(\v25.agentgateway.dev.resource.FrontendPolicySpec.MetricsH\x00R\ametrics\x12Q\n" +
-	"\aconnect\x18\t \x01(\v25.agentgateway.dev.resource.FrontendPolicySpec.ConnectH\x00R\aconnect\x1a\xbd\n" +
+	"\aconnect\x18\t \x01(\v25.agentgateway.dev.resource.FrontendPolicySpec.ConnectH\x00R\aconnect\x1a\xf5\n" +
 	"\n" +
 	"\x04HTTP\x12+\n" +
 	"\x0fmax_buffer_size\x18\x01 \x01(\rH\x00R\rmaxBufferSize\x88\x01\x01\x12/\n" +
@@ -19109,12 +19120,15 @@ const file_resource_proto_rawDesc = "" +
 	" \x01(\rH\x05R\x12http2MaxHeaderSize\x88\x01\x01\x12m\n" +
 	"\x11http1_header_case\x18\v \x01(\x0e2A.agentgateway.dev.resource.FrontendPolicySpec.HTTP.HTTPHeaderCaseR\x0fhttp1HeaderCase\x12;\n" +
 	"\x17max_concurrent_requests\x18\f \x01(\rH\x06R\x15maxConcurrentRequests\x88\x01\x01\x12N\n" +
-	"\x05http3\x18\r \x01(\v28.agentgateway.dev.resource.FrontendPolicySpec.HTTP.HTTP3R\x05http3\x1a\xdd\x01\n" +
+	"\x05http3\x18\r \x01(\v28.agentgateway.dev.resource.FrontendPolicySpec.HTTP.HTTP3R\x05http3\x1a\x95\x02\n" +
 	"\x05HTTP3\x12@\n" +
 	"\x0falt_svc_max_age\x18\x01 \x01(\v2\x19.google.protobuf.DurationR\faltSvcMaxAge\x12<\n" +
 	"\fidle_timeout\x18\x02 \x01(\v2\x19.google.protobuf.DurationR\vidleTimeout\x129\n" +
-	"\x16max_concurrent_streams\x18\x03 \x01(\rH\x00R\x14maxConcurrentStreams\x88\x01\x01B\x19\n" +
-	"\x17_max_concurrent_streams\"-\n" +
+	"\x16max_concurrent_streams\x18\x03 \x01(\rH\x00R\x14maxConcurrentStreams\x88\x01\x01\x12%\n" +
+	"\falt_svc_port\x18\x04 \x01(\rH\x01R\n" +
+	"altSvcPort\x88\x01\x01B\x19\n" +
+	"\x17_max_concurrent_streamsB\x0f\n" +
+	"\r_alt_svc_port\"-\n" +
 	"\x0eHTTPHeaderCase\x12\r\n" +
 	"\tLOWERCASE\x10\x00\x12\f\n" +
 	"\bPRESERVE\x10\x01B\x12\n" +

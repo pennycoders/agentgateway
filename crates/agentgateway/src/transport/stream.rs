@@ -629,7 +629,8 @@ impl Extension {
 	}
 }
 
-fn to_canonical(addr: SocketAddr) -> SocketAddr {
+/// Maps IPv4-mapped IPv6 addresses (as seen on dual-stack `[::]` sockets) to IPv4.
+pub(crate) fn to_canonical(addr: SocketAddr) -> SocketAddr {
 	// another match has to be used for IPv4 and IPv6 support
 	let ip = addr.ip().to_canonical();
 	SocketAddr::from((ip, addr.port()))

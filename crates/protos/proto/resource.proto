@@ -778,6 +778,10 @@ message FrontendPolicySpec {
       google.protobuf.Duration idle_timeout = 2;
       // Maximum concurrent request streams per QUIC connection. Defaults to 100.
       optional uint32 max_concurrent_streams = 3;
+      // UDP port advertised in Alt-Svc, when clients reach the QUIC endpoint on a
+      // different port than the one it listens on (NAT, load balancer). Defaults
+      // to the port of the bind.
+      optional uint32 alt_svc_port = 4;
     }
     // Serve HTTP/3 (QUIC) on the UDP port matching each HTTPS listener of the bind,
     // and advertise it with Alt-Svc. Unset disables HTTP/3.

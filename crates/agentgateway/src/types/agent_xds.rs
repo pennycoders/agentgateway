@@ -3560,11 +3560,28 @@ fn frontend_policy_from_proto(
 			max_concurrent_requests: h
 				.max_concurrent_requests
 				.and_then(std::num::NonZeroU32::new),
-			http3: h.http3.as_ref().map(|h3| frontend::HTTP3 {
-				alt_svc_max_age: h3.alt_svc_max_age.map(convert_duration),
-				idle_timeout: h3.idle_timeout.map(convert_duration),
-				max_concurrent_streams: h3.max_concurrent_streams,
-			}),
+			http3: h
+				.http3
+				.as_ref()
+				.map(|h3| {
+					Ok::<_, ProtoError>(frontend::HTTP3 {
+						alt_svc_max_age: h3.alt_svc_max_age.map(convert_duration),
+						idle_timeout: h3.idle_timeout.map(convert_duration),
+						max_concurrent_streams: h3
+							.max_concurrent_streams
+							.and_then(std::num::NonZeroU32::new),
+						alt_svc_port: h3
+							.alt_svc_port
+							.map(|port| {
+								u16::try_from(port)
+									.ok()
+									.and_then(std::num::NonZeroU16::new)
+									.ok_or_else(|| ProtoError::Generic(format!("invalid http3 altSvcPort {port}")))
+							})
+							.transpose()?,
+					})
+				})
+				.transpose()?,
 		}),
 		Some(fps::Kind::Tls(t)) => FrontendPolicy::TLS(frontend::TLS {
 			handshake_timeout: t
@@ -6602,6 +6619,7 @@ mod tests {
 				nanos: 0,
 			}),
 			max_concurrent_streams: Some(50),
+			alt_svc_port: Some(8443),
 		}));
 		let FrontendPolicy::HTTP(enabled) = frontend_policy_from_proto(&spec, &mut diag)? else {
 			panic!("Expected HTTP policy variant");
@@ -6611,7 +6629,8 @@ mod tests {
 			Some(crate::types::frontend::HTTP3 {
 				alt_svc_max_age: Some(Duration::from_secs(3600)),
 				idle_timeout: Some(Duration::from_secs(10)),
-				max_concurrent_streams: Some(50),
+				max_concurrent_streams: std::num::NonZeroU32::new(50),
+				alt_svc_port: std::num::NonZeroU16::new(8443),
 			})
 		);
 

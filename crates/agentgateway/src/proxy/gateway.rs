@@ -1209,7 +1209,7 @@ impl Gateway {
 		proxy.proxy(stream).await
 	}
 
-	async fn wait_for_listener_change(
+	pub(super) async fn wait_for_listener_change(
 		stores: Stores,
 		bind_name: BindKey,
 		listener_snapshot: Arc<Listener>,

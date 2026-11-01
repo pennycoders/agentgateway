@@ -10885,7 +10885,18 @@
             "null"
           ],
           "format": "uint32",
-          "minimum": 0,
+          "minimum": 1,
+          "default": null
+        },
+        "altSvcPort": {
+          "description": "UDP port advertised in `Alt-Svc`, when clients reach the QUIC endpoint on a different port\nthan the one it listens on, for example behind NAT or a load balancer. Defaults to the\nport of the bind.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 1,
+          "maximum": 65535,
           "default": null
         }
       },

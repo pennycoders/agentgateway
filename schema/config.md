@@ -1599,6 +1599,7 @@
 |`frontendPolicies.http.http3.altSvcMaxAge`|string|How long clients may cache the `Alt-Svc` advertisement (the `ma` parameter).<br>Defaults to 24 hours.|
 |`frontendPolicies.http.http3.idleTimeout`|string|How long an idle QUIC connection may stay open. Defaults to 30 seconds.|
 |`frontendPolicies.http.http3.maxConcurrentStreams`|integer|Maximum number of concurrent request streams per QUIC connection. Defaults to 100.|
+|`frontendPolicies.http.http3.altSvcPort`|integer|UDP port advertised in `Alt-Svc`, when clients reach the QUIC endpoint on a different port<br>than the one it listens on, for example behind NAT or a load balancer. Defaults to the<br>port of the bind.|
 |`frontendPolicies.tls`|object|Settings for handling incoming TLS connections.|
 |`frontendPolicies.tls.handshakeTimeout`|string|Maximum time allowed to complete the downstream TLS handshake.|
 |`frontendPolicies.tls.alpn`|array|ALPN protocols advertised to downstream clients.|

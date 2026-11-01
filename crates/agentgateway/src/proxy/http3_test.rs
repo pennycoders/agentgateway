@@ -1,5 +1,5 @@
 use std::future::poll_fn;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,6 +7,7 @@ use agent_core::strng;
 use bytes::{Buf, Bytes};
 use http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use serde_json::json;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::*;
 use crate::proxy::request_builder::RequestBuilder;
@@ -47,18 +48,33 @@ fn https_listener(tls: ServerTLSConfig) -> Listener {
 	}
 }
 
-/// An HTTPS bind for `*.example.com` on a port that is free for UDP.
-fn https_bind(port: u16, tls: ServerTLSConfig) -> BindSnapshot {
+fn bind_at(address: SocketAddr, listeners: ListenerSet) -> BindSnapshot {
 	BindSnapshot::new(
 		Bind {
 			key: BIND_KEY,
-			address: SocketAddr::from(([127, 0, 0, 1], port)),
+			address,
 			protocol: BindProtocol::tls,
 			tunnel_protocol: Default::default(),
 			mode: Default::default(),
 		},
+		listeners,
+	)
+}
+
+/// An HTTPS bind for `*.example.com` on a port that is free for UDP.
+fn https_bind(port: u16, tls: ServerTLSConfig) -> BindSnapshot {
+	bind_at(
+		SocketAddr::from(([127, 0, 0, 1], port)),
 		ListenerSet::from_list([https_listener(tls)]),
 	)
+}
+
+fn test_with(backend: SocketAddr, bind: BindSnapshot) -> TestBind {
+	setup_proxy_test("{}")
+		.unwrap()
+		.with_backend(backend)
+		.with_bind(bind)
+		.with_route(basic_route(backend))
 }
 
 async fn setup_without_serving(
@@ -67,11 +83,7 @@ async fn setup_without_serving(
 ) -> (wiremock::MockServer, TestBind, u16) {
 	let mock = simple_mock().await;
 	let port = free_udp_port();
-	let mut t = setup_proxy_test("{}")
-		.unwrap()
-		.with_backend(*mock.address())
-		.with_bind(https_bind(port, tls))
-		.with_route(basic_route(*mock.address()));
+	let mut t = test_with(*mock.address(), https_bind(port, tls));
 	if let Some(http3) = http3 {
 		t.attach_frontend_policy(json!({ "http": { "http3": http3 } }))
 			.await;
@@ -85,9 +97,19 @@ async fn setup(http3: Option<serde_json::Value>) -> (wiremock::MockServer, TestB
 	(mock, t, port)
 }
 
+/// Serves HTTP/3 on `*.example.com` with the given frontend policy, proxying to `backend`.
+async fn serve_with_policy(backend: SocketAddr, policy: serde_json::Value) -> (TestBind, u16) {
+	let port = free_udp_port();
+	let mut t = test_with(backend, https_bind(port, server_tls(None)));
+	t.attach_frontend_policy(policy).await;
+	t.serve_http3(BIND_KEY);
+	wait_for_http3(&t, true).await;
+	(t, port)
+}
+
 async fn wait_for_http3(t: &TestBind, serving: bool) {
 	tokio::time::timeout(Duration::from_secs(10), async {
-		while t.pi.http3.alt_svc(&BIND_KEY, &LISTENER_KEY).is_some() != serving {
+		while t.pi.http3.is_serving(&BIND_KEY, &LISTENER_KEY) != serving {
 			tokio::time::sleep(Duration::from_millis(10)).await;
 		}
 	})
@@ -98,11 +120,11 @@ async fn wait_for_http3(t: &TestBind, serving: bool) {
 struct H3Client {
 	send: h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
 	driver: tokio::task::JoinHandle<h3::error::ConnectionError>,
-	_conn: quinn::Connection,
+	conn: quinn::Connection,
 	_endpoint: quinn::Endpoint,
 }
 
-async fn try_connect(port: u16, sni: &str) -> anyhow::Result<H3Client> {
+fn client_tls(sni: &str) -> anyhow::Result<rustls::ClientConfig> {
 	let tls: crate::http::backendtls::BackendTLS = crate::http::backendtls::ResolvedBackendTLS {
 		cert: None,
 		key: None,
@@ -119,6 +141,10 @@ async fn try_connect(port: u16, sni: &str) -> anyhow::Result<H3Client> {
 	.try_into()?;
 	let mut config = (*tls.base_config().config).clone();
 	config.alpn_protocols = vec![b"h3".to_vec()];
+	Ok(config)
+}
+
+fn client_endpoint(config: rustls::ClientConfig) -> anyhow::Result<quinn::Endpoint> {
 	let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(Arc::new(config))?;
 	let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse()?)?;
 	let mut client_config = quinn::ClientConfig::new(Arc::new(crypto));
@@ -127,6 +153,11 @@ async fn try_connect(port: u16, sni: &str) -> anyhow::Result<H3Client> {
 	transport.max_idle_timeout(Some(Duration::from_secs(2).try_into()?));
 	client_config.transport_config(Arc::new(transport));
 	endpoint.set_default_client_config(client_config);
+	Ok(endpoint)
+}
+
+async fn try_connect(port: u16, sni: &str) -> anyhow::Result<H3Client> {
+	let endpoint = client_endpoint(client_tls(sni)?)?;
 	let conn = endpoint
 		.connect(SocketAddr::from(([127, 0, 0, 1], port)), sni)?
 		.await?;
@@ -135,13 +166,24 @@ async fn try_connect(port: u16, sni: &str) -> anyhow::Result<H3Client> {
 	Ok(H3Client {
 		send,
 		driver,
-		_conn: conn,
+		conn,
 		_endpoint: endpoint,
 	})
 }
 
 async fn connect(port: u16, sni: &str) -> H3Client {
 	try_connect(port, sni).await.expect("HTTP/3 connection")
+}
+
+/// Connects and sends one GET, reporting any failure instead of panicking.
+async fn try_get(port: u16, sni: &str) -> anyhow::Result<StatusCode> {
+	let mut client = try_connect(port, sni).await?;
+	let req = ::http::Request::builder()
+		.uri(format!("https://{sni}/"))
+		.body(())?;
+	let mut stream = client.send.send_request(req).await?;
+	stream.finish().await?;
+	Ok(stream.recv_response().await?.status())
 }
 
 struct H3Response {
@@ -203,6 +245,46 @@ fn remove_all_policies(t: &TestBind) {
 	}
 }
 
+/// Waits for the client connection to be closed by the server, gracefully.
+async fn expect_graceful_close(client: H3Client) {
+	let err = tokio::time::timeout(Duration::from_secs(10), client.driver)
+		.await
+		.expect("connection closes after GOAWAY")
+		.unwrap();
+	assert!(err.is_h3_no_error(), "{err}");
+}
+
+/// A raw HTTP/1.1 backend that answers every request with `response` and then closes the
+/// connection. Reports each request it read.
+async fn raw_backend(
+	response: &'static [u8],
+) -> (SocketAddr, tokio::sync::mpsc::UnboundedReceiver<()>) {
+	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let addr = listener.local_addr().unwrap();
+	let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+	tokio::spawn(async move {
+		while let Ok((mut conn, _)) = listener.accept().await {
+			let tx = tx.clone();
+			tokio::spawn(async move {
+				read_request_head(&mut conn).await;
+				let _ = tx.send(());
+				let _ = conn.write_all(response).await;
+			});
+		}
+	});
+	(addr, rx)
+}
+
+async fn read_request_head(conn: &mut tokio::net::TcpStream) {
+	let mut head = Vec::new();
+	let mut buf = [0u8; 1024];
+	while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+		let n = conn.read(&mut buf).await.unwrap();
+		assert_ne!(n, 0, "connection closed before the request head");
+		head.extend_from_slice(&buf[..n]);
+	}
+}
+
 #[tokio::test]
 async fn request_through_route() {
 	let (_mock, t, port) = setup(Some(json!({}))).await;
@@ -217,6 +299,13 @@ async fn request_through_route() {
 	assert_eq!(dump.uri.query(), Some("bar=baz"));
 	// The upstream request does not inherit HTTP/3 from the downstream.
 	assert_eq!(dump.version, ::http::Version::HTTP_11);
+	// A request without a body is forwarded without one (RFC 9114, section 4.1).
+	assert!(
+		dump.headers.get(header::TRANSFER_ENCODING).is_none(),
+		"{:?}",
+		dump.headers
+	);
+	assert!(dump.headers.get(header::CONTENT_LENGTH).is_none());
 	// HTTP/3 responses do not advertise HTTP/3 again.
 	assert!(resp.headers.get(header::ALT_SVC).is_none());
 
@@ -224,6 +313,22 @@ async fn request_through_route() {
 	let resp = client.get("https://a.example.com/second").await;
 	assert_eq!(resp.status, StatusCode::OK);
 	assert_eq!(resp.dump().uri.path(), "/second");
+
+	// Connections are labelled as HTTP/3.
+	let labels = TCPLabels {
+		bind: Some(&BIND_KEY).into(),
+		gateway: Some(Listener::default().name.as_gateway_name()).into(),
+		listener: Listener::default().name.listener_name.clone().into(),
+		protocol: TransportProtocol::http3,
+	};
+	assert_eq!(
+		t.pi
+			.metrics
+			.downstream_connection
+			.get_or_create(&labels)
+			.get(),
+		1
+	);
 }
 
 #[tokio::test]
@@ -245,6 +350,54 @@ async fn request_body_is_forwarded() {
 	let dump = resp.dump();
 	assert_eq!(dump.method, Method::POST);
 	assert_eq!(dump.body.as_ref(), b"hello over quic");
+
+	// With a content-length, the body is forwarded with that length.
+	let req = ::http::Request::builder()
+		.method(Method::POST)
+		.uri("https://a.example.com/upload")
+		.header(header::CONTENT_LENGTH, "5")
+		.body(())
+		.unwrap();
+	let resp = client
+		.request(req, Some(Bytes::from_static(b"hello")))
+		.await;
+	assert_eq!(resp.status, StatusCode::OK);
+	let dump = resp.dump();
+	assert_eq!(dump.body.as_ref(), b"hello");
+	assert_eq!(dump.headers[header::CONTENT_LENGTH], "5");
+	assert!(dump.headers.get(header::TRANSFER_ENCODING).is_none());
+}
+
+#[tokio::test]
+async fn content_length_must_match_the_body() {
+	let (mock, t, port) = setup(Some(json!({}))).await;
+	wait_for_http3(&t, true).await;
+	let mut client = connect(port, "a.example.com").await;
+	for body in [&b"hi"[..], &b"too long"[..]] {
+		let req = ::http::Request::builder()
+			.method(Method::POST)
+			.uri("https://a.example.com/upload")
+			.header(header::CONTENT_LENGTH, "5")
+			.body(())
+			.unwrap();
+		let mut stream = client.send.send_request(req).await.unwrap();
+		stream
+			.send_data(Bytes::copy_from_slice(body))
+			.await
+			.unwrap();
+		stream.finish().await.unwrap();
+		// The request is malformed (RFC 9114, section 4.1.2); it never succeeds.
+		if let Ok(resp) = stream.recv_response().await {
+			assert_ne!(resp.status(), StatusCode::OK);
+		}
+	}
+	let received = mock.received_requests().await.unwrap_or_default();
+	assert!(
+		received
+			.iter()
+			.all(|r| r.body.len() == 5 || r.body.is_empty()),
+		"a body not matching its content-length reached the backend"
+	);
 }
 
 #[tokio::test]
@@ -271,6 +424,37 @@ async fn route_policies_apply() {
 	assert_eq!(resp.status, StatusCode::OK);
 	assert_eq!(resp.headers["x-route-resp"], "route-resp");
 	assert_eq!(resp.dump().headers["x-route-req"], "route-req");
+}
+
+#[tokio::test]
+async fn ipv4_clients_on_a_dual_stack_bind_are_canonical() {
+	let mock = simple_mock().await;
+	let port = std::net::UdpSocket::bind("[::]:0")
+		.unwrap()
+		.local_addr()
+		.unwrap()
+		.port();
+	let bind = bind_at(
+		SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port),
+		ListenerSet::from_list([https_listener(server_tls(None))]),
+	);
+	let mut t = test_with(*mock.address(), bind);
+	t.attach_frontend_policy(json!({
+		"http": { "http3": {} },
+		// The client connects from 127.0.0.1, which a dual-stack socket reports as ::ffff:127.0.0.1.
+		"networkAuthorization": {
+			"rules": ["cidr('127.0.0.0/8').containsIP(source.address) && cidr('127.0.0.0/8').containsIP(destination.address)"],
+		},
+	}))
+	.await;
+	t.serve_http3(BIND_KEY);
+	wait_for_http3(&t, true).await;
+
+	let mut client = connect(port, "a.example.com").await;
+	assert_eq!(
+		client.get("https://a.example.com/").await.status,
+		StatusCode::OK
+	);
 }
 
 #[tokio::test]
@@ -322,6 +506,42 @@ async fn frontend_request_limit_applies() {
 }
 
 #[tokio::test]
+async fn request_capacity_is_taken_after_headers() {
+	let mock = simple_mock().await;
+	let (t, port) = serve_with_policy(
+		*mock.address(),
+		json!({ "http": { "http3": {}, "maxConcurrentRequests": 1, "http1IdleTimeout": "1s" } }),
+	)
+	.await;
+	let mut client = connect(port, "a.example.com").await;
+
+	// A request stream whose headers never complete: only the type of a HEADERS frame.
+	let (mut send, mut recv) = client.conn.open_bi().await.unwrap();
+	send.write_all(&[0x01]).await.unwrap();
+	tokio::time::sleep(Duration::from_millis(200)).await;
+
+	// It does not hold the only request slot.
+	assert_eq!(
+		client.get("https://a.example.com/").await.status,
+		StatusCode::OK
+	);
+	// It is rejected once the header timeout passes.
+	let err = tokio::time::timeout(Duration::from_secs(5), recv.read_to_end(1024))
+		.await
+		.expect("the stream is reset after the header timeout")
+		.expect_err("no response is sent");
+	assert!(
+		matches!(
+			err,
+			quinn::ReadToEndError::Read(quinn::ReadError::Reset(code))
+				if code.into_inner() == Code::H3_REQUEST_REJECTED.value()
+		),
+		"{err:?}"
+	);
+	drop(t);
+}
+
+#[tokio::test]
 async fn alt_svc_advertised_only_when_enabled() {
 	// Disabled (the default): no Alt-Svc and no UDP socket.
 	let (_mock, t, port) = setup(None).await;
@@ -341,40 +561,57 @@ async fn alt_svc_advertised_only_when_enabled() {
 		res.headers()[header::ALT_SVC],
 		format!("h3=\":{port}\"; ma=3600")
 	);
+
+	// The advertised port can differ from the bound one, for NAT or load balancers.
+	let (_mock, t, _port) = setup(Some(json!({"altSvcPort": 443}))).await;
+	wait_for_http3(&t, true).await;
+	assert_eq!(
+		https_get(&t).await.headers()[header::ALT_SVC],
+		"h3=\":443\"; ma=86400"
+	);
 }
 
 #[tokio::test]
-async fn alt_svc_requires_a_serving_endpoint() {
+async fn binding_is_retried_until_the_port_is_free() {
 	// The policy alone does not advertise HTTP/3; only a bound endpoint does.
 	let (_mock, t, port) = setup_without_serving(Some(json!({})), server_tls(None)).await;
 	// Something else holds the UDP port, so the endpoint cannot bind.
-	let _taken = std::net::UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], port))).unwrap();
+	let taken = std::net::UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], port))).unwrap();
 	t.serve_http3(BIND_KEY);
 	tokio::time::sleep(Duration::from_millis(200)).await;
 	let res = https_get(&t).await;
 	assert_eq!(res.status(), StatusCode::OK);
 	assert!(res.headers().get(header::ALT_SVC).is_none());
+
+	// Once the port is free, the endpoint binds without any configuration change.
+	drop(taken);
+	wait_for_http3(&t, true).await;
+	let mut client = connect(port, "a.example.com").await;
+	assert_eq!(
+		client.get("https://a.example.com/").await.status,
+		StatusCode::OK
+	);
 }
 
 #[test]
 fn registry_advertises_served_listeners_only() {
 	let registry = Http3Registry::default();
-	registry.set(
-		&BIND_KEY,
-		Some(Advertisement {
-			listeners: [LISTENER_KEY].into_iter().collect(),
-			alt_svc: alt_svc_value(443, Duration::from_secs(60)),
-		}),
-	);
+	let advertisement = || Advertisement {
+		listeners: [LISTENER_KEY].into_iter().collect(),
+		alt_svc: alt_svc_value(443, Duration::from_secs(60)),
+		max_age: Duration::from_secs(60),
+	};
+	registry.set(&BIND_KEY, 0, Some(advertisement()));
 	let mut headers = HeaderMap::new();
 	registry.advertise(&BIND_KEY, &LISTENER_KEY, &mut headers);
 	assert_eq!(headers[header::ALT_SVC], "h3=\":443\"; ma=60");
+	assert!(registry.is_serving(&BIND_KEY, &LISTENER_KEY));
 
 	// An Alt-Svc set by the backend or a policy wins.
 	let mut headers = HeaderMap::new();
-	headers.insert(header::ALT_SVC, HeaderValue::from_static("clear"));
+	headers.insert(header::ALT_SVC, HeaderValue::from_static("h2=\":8443\""));
 	registry.advertise(&BIND_KEY, &LISTENER_KEY, &mut headers);
-	assert_eq!(headers[header::ALT_SVC], "clear");
+	assert_eq!(headers[header::ALT_SVC], "h2=\":8443\"");
 
 	// Other listeners and binds are not advertised.
 	let mut headers = HeaderMap::new();
@@ -382,8 +619,40 @@ fn registry_advertises_served_listeners_only() {
 	registry.advertise(&strng::new("other"), &LISTENER_KEY, &mut headers);
 	assert!(headers.is_empty());
 
-	registry.set(&BIND_KEY, None);
+	// Once HTTP/3 stops, clients are told to forget it for as long as they may have cached it.
+	registry.set(&BIND_KEY, 0, None);
+	assert!(!registry.is_serving(&BIND_KEY, &LISTENER_KEY));
+	assert_eq!(
+		registry.alt_svc(&BIND_KEY, &LISTENER_KEY),
+		Some(ALT_SVC_CLEAR)
+	);
+	// Serving again advertises again.
+	registry.set(&BIND_KEY, 0, Some(advertisement()));
+	assert!(registry.is_serving(&BIND_KEY, &LISTENER_KEY));
+
+	// A listener that is no longer served is cleared, the others stay advertised.
+	registry.set(
+		&BIND_KEY,
+		0,
+		Some(Advertisement {
+			listeners: [strng::new("other")].into_iter().collect(),
+			..advertisement()
+		}),
+	);
+	assert_eq!(
+		registry.alt_svc(&BIND_KEY, &LISTENER_KEY),
+		Some(ALT_SVC_CLEAR)
+	);
+	assert!(registry.is_serving(&BIND_KEY, &strng::new("other")));
+
+	// The supervisor of a bind that was replaced does not clear its successor.
+	registry.set(&BIND_KEY, 1, Some(advertisement()));
+	registry.remove(&BIND_KEY, 0);
+	assert!(registry.is_serving(&BIND_KEY, &LISTENER_KEY));
+	// A removed bind is forgotten.
+	registry.remove(&BIND_KEY, 1);
 	assert!(registry.alt_svc(&BIND_KEY, &LISTENER_KEY).is_none());
+	assert!(!registry.any.load(Ordering::Relaxed));
 }
 
 #[tokio::test]
@@ -398,15 +667,12 @@ async fn disabling_stops_serving() {
 
 	remove_all_policies(&t);
 	wait_for_http3(&t, false).await;
+	// Clients that cached the advertisement are told to forget it (RFC 7838, section 3).
 	let res = https_get(&t).await;
-	assert!(res.headers().get(header::ALT_SVC).is_none());
+	assert_eq!(res.headers()[header::ALT_SVC], "clear");
 
 	// The open connection is asked to go away and is closed.
-	let err = tokio::time::timeout(Duration::from_secs(10), client.driver)
-		.await
-		.expect("connection closes after GOAWAY")
-		.unwrap();
-	assert!(err.is_h3_no_error(), "{err}");
+	expect_graceful_close(client).await;
 	// New connections are refused.
 	assert!(try_connect(port, "a.example.com").await.is_err());
 }
@@ -429,9 +695,29 @@ async fn reenabling_serves_again() {
 
 #[tokio::test]
 async fn sni_must_match_an_https_listener() {
-	let (_mock, t, port) = setup(Some(json!({}))).await;
+	let mock = simple_mock().await;
+	let port = free_udp_port();
+	let passthrough = Listener {
+		key: strng::new("passthrough"),
+		name: Default::default(),
+		hostname: strng::new("pass.example.com"),
+		protocol: ListenerProtocol::TLS(None),
+		..Default::default()
+	};
+	let bind = bind_at(
+		SocketAddr::from(([127, 0, 0, 1], port)),
+		ListenerSet::from_list([https_listener(server_tls(None)), passthrough]),
+	);
+	let mut t = test_with(*mock.address(), bind);
+	t.attach_frontend_policy(json!({ "http": { "http3": {} } }))
+		.await;
+	t.serve_http3(BIND_KEY);
 	wait_for_http3(&t, true).await;
+
 	assert!(try_connect(port, "not-the-domain").await.is_err());
+	// The TCP listener passes TLS for this name through; HTTP/3 must not terminate it with the
+	// certificate of the wildcard HTTPS listener.
+	assert!(try_connect(port, "pass.example.com").await.is_err());
 	let mut client = connect(port, "b.example.com").await;
 	assert_eq!(
 		client.get("https://b.example.com/").await.status,
@@ -465,6 +751,55 @@ async fn mtls_listeners_are_not_served() {
 }
 
 #[tokio::test]
+async fn listener_requiring_client_certificates_drains_connections() {
+	let (_mock, t, port) = setup(Some(json!({}))).await;
+	wait_for_http3(&t, true).await;
+	let mut client = connect(port, "a.example.com").await;
+	assert_eq!(
+		client.get("https://a.example.com/").await.status,
+		StatusCode::OK
+	);
+
+	// The listener starts verifying client certificates, which HTTP/3 cannot: the connection that
+	// was established without one must not keep serving requests.
+	t.pi
+		.stores
+		.binds
+		.write()
+		.insert_listener(https_listener(server_tls(Some(CA_CERT.to_vec()))), BIND_KEY);
+	expect_graceful_close(client).await;
+	assert!(try_get(port, "a.example.com").await.is_err());
+}
+
+#[tokio::test]
+async fn listener_change_drains_connections() {
+	let (_mock, t, port) = setup(Some(json!({}))).await;
+	wait_for_http3(&t, true).await;
+	let mut client = connect(port, "a.example.com").await;
+	assert_eq!(
+		client.get("https://a.example.com/").await.status,
+		StatusCode::OK
+	);
+
+	// The listener changes but is still served over HTTP/3: connections made with the previous
+	// listener are drained, like on the TCP listener, and new ones use the new listener.
+	let mut listener = https_listener(server_tls(None));
+	listener.hostname = strng::new("a.example.com");
+	t.pi
+		.stores
+		.binds
+		.write()
+		.insert_listener(listener, BIND_KEY);
+	expect_graceful_close(client).await;
+	assert!(t.pi.http3.is_serving(&BIND_KEY, &LISTENER_KEY));
+	assert_eq!(
+		try_get(port, "a.example.com").await.unwrap(),
+		StatusCode::OK
+	);
+	assert!(try_get(port, "b.example.com").await.is_err());
+}
+
+#[tokio::test]
 async fn tls_policy_must_allow_tls13() {
 	let (_mock, mut t, _port) = setup_without_serving(None, server_tls(None)).await;
 	t.attach_frontend_policy(json!({
@@ -474,6 +809,41 @@ async fn tls_policy_must_allow_tls13() {
 	.await;
 	let err = desired_state(&t.pi, &BIND_KEY).err().expect("rejected");
 	assert!(err.to_string().contains("TLS 1.3"), "{err}");
+}
+
+#[tokio::test]
+async fn binds_that_change_the_tcp_stream_are_not_served() {
+	for (policy, expected) in [
+		(
+			json!({ "proxyProtocol": { "version": "all", "mode": "optional" } }),
+			"PROXY",
+		),
+		(json!({ "connect": { "mode": "tunnel" } }), "CONNECT"),
+		(json!({ "connect": { "mode": "route" } }), "CONNECT"),
+	] {
+		let (_mock, mut t, _port) = setup_without_serving(None, server_tls(None)).await;
+		let mut policy = policy;
+		policy["http"] = json!({ "http3": {} });
+		t.attach_frontend_policy(policy).await;
+		let err = desired_state(&t.pi, &BIND_KEY).err().expect("rejected");
+		assert!(err.to_string().contains(expected), "{err}");
+	}
+
+	// CONNECT requests that are only denied do not change the stream.
+	let (_mock, mut t, _port) = setup_without_serving(None, server_tls(None)).await;
+	t.attach_frontend_policy(json!({ "http": { "http3": {} }, "connect": { "mode": "deny" } }))
+		.await;
+	assert!(desired_state(&t.pi, &BIND_KEY).unwrap().is_some());
+
+	// Neither are tunnel binds.
+	let mock = simple_mock().await;
+	let mut bind = https_bind(free_udp_port(), server_tls(None));
+	Arc::make_mut(&mut bind.bind).tunnel_protocol = TunnelProtocol::Proxy;
+	let mut t = test_with(*mock.address(), bind);
+	t.attach_frontend_policy(json!({ "http": { "http3": {} } }))
+		.await;
+	let err = desired_state(&t.pi, &BIND_KEY).err().expect("rejected");
+	assert!(err.to_string().contains("tunnel protocol"), "{err}");
 }
 
 #[tokio::test]
@@ -489,11 +859,263 @@ async fn graceful_drain_closes_connections() {
 	// The drain completes even though a client connection was open, and the client is told to
 	// go away.
 	t.start_drain().await;
-	let err = tokio::time::timeout(Duration::from_secs(10), client.driver)
-		.await
-		.expect("connection closed")
+	expect_graceful_close(client).await;
+}
+
+#[tokio::test]
+async fn graceful_drain_delivers_in_flight_responses() {
+	const SIZE: usize = 8 * 1024 * 1024;
+	let mock = wiremock::MockServer::start().await;
+	wiremock::Mock::given(wiremock::matchers::any())
+		.respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(vec![b'x'; SIZE]))
+		.mount(&mock)
+		.await;
+	let (t, port) = serve_with_policy(*mock.address(), json!({ "http": { "http3": {} } })).await;
+	let mut client = connect(port, "a.example.com").await;
+	let req = ::http::Request::builder()
+		.uri("https://a.example.com/large")
+		.body(())
 		.unwrap();
-	assert!(err.is_h3_no_error(), "{err}");
+	let mut stream = client.send.send_request(req).await.unwrap();
+	stream.finish().await.unwrap();
+	assert_eq!(
+		stream.recv_response().await.unwrap().status(),
+		StatusCode::OK
+	);
+	let mut received = stream
+		.recv_data()
+		.await
+		.unwrap()
+		.map(|c| c.remaining())
+		.unwrap_or_default();
+
+	// Drain while most of the response is still in flight.
+	let reader = tokio::spawn(async move {
+		while let Some(chunk) = stream.recv_data().await.unwrap() {
+			received += chunk.remaining();
+		}
+		received
+	});
+	t.start_drain().await;
+	assert_eq!(reader.await.unwrap(), SIZE);
+	expect_graceful_close(client).await;
+}
+
+#[tokio::test]
+async fn upstream_body_error_resets_the_response() {
+	// The backend announces more body than it sends, then closes the connection.
+	let (backend, _requests) =
+		raw_backend(b"HTTP/1.1 200 OK\r\ncontent-length: 1000\r\n\r\nonly a part").await;
+	let (_t, port) = serve_with_policy(backend, json!({ "http": { "http3": {} } })).await;
+	let mut client = connect(port, "a.example.com").await;
+	let req = ::http::Request::builder()
+		.uri("https://a.example.com/")
+		.body(())
+		.unwrap();
+	let mut stream = client.send.send_request(req).await.unwrap();
+	stream.finish().await.unwrap();
+	// The truncated response must not end like a complete one: the stream is reset, which may
+	// even discard the response headers before they are read.
+	let err = async {
+		let resp = stream.recv_response().await?;
+		assert_eq!(resp.status(), StatusCode::OK);
+		while stream.recv_data().await?.is_some() {}
+		Ok::<_, h3::error::StreamError>(())
+	}
+	.await
+	.expect_err("the stream is reset, not finished");
+	assert!(err.to_string().contains("H3_INTERNAL_ERROR"), "{err}");
+}
+
+#[tokio::test]
+async fn client_cancellation_cancels_the_upstream_request() {
+	// The backend never answers; it reports when the gateway gives up on the request.
+	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let backend = listener.local_addr().unwrap();
+	let (received_tx, received) = tokio::sync::oneshot::channel();
+	let (closed_tx, closed) = tokio::sync::oneshot::channel();
+	tokio::spawn(async move {
+		let (mut conn, _) = listener.accept().await.unwrap();
+		read_request_head(&mut conn).await;
+		received_tx.send(()).unwrap();
+		let mut buf = [0u8; 1024];
+		while conn.read(&mut buf).await.is_ok_and(|n| n > 0) {}
+		closed_tx.send(()).unwrap();
+	});
+	let (_t, port) = serve_with_policy(backend, json!({ "http": { "http3": {} } })).await;
+	let mut client = connect(port, "a.example.com").await;
+	let req = ::http::Request::builder()
+		.uri("https://a.example.com/")
+		.body(())
+		.unwrap();
+	let mut stream = client.send.send_request(req).await.unwrap();
+	stream.finish().await.unwrap();
+	tokio::time::timeout(Duration::from_secs(5), received)
+		.await
+		.expect("the request reaches the backend")
+		.unwrap();
+
+	// The client cancels the request (RFC 9114, section 4.1.1).
+	stream.stop_sending(Code::H3_REQUEST_CANCELLED);
+	drop(stream);
+	tokio::time::timeout(Duration::from_secs(5), closed)
+		.await
+		.expect("the upstream request is cancelled")
+		.unwrap();
+}
+
+/// A certificate verifier that hangs, keeping a QUIC handshake in progress.
+#[derive(Debug)]
+struct HangingVerifier(Duration);
+
+impl rustls::client::danger::ServerCertVerifier for HangingVerifier {
+	fn verify_server_cert(
+		&self,
+		_end_entity: &rustls::pki_types::CertificateDer<'_>,
+		_intermediates: &[rustls::pki_types::CertificateDer<'_>],
+		_server_name: &rustls::pki_types::ServerName<'_>,
+		_ocsp_response: &[u8],
+		_now: rustls::pki_types::UnixTime,
+	) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+		std::thread::sleep(self.0);
+		Err(rustls::Error::General("hung up".to_string()))
+	}
+
+	fn verify_tls12_signature(
+		&self,
+		_message: &[u8],
+		_cert: &rustls::pki_types::CertificateDer<'_>,
+		_dss: &rustls::DigitallySignedStruct,
+	) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+		Err(rustls::Error::General("unused".to_string()))
+	}
+
+	fn verify_tls13_signature(
+		&self,
+		_message: &[u8],
+		_cert: &rustls::pki_types::CertificateDer<'_>,
+		_dss: &rustls::DigitallySignedStruct,
+	) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+		Err(rustls::Error::General("unused".to_string()))
+	}
+
+	fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+		vec![
+			rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+			rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+			rustls::SignatureScheme::RSA_PSS_SHA256,
+			rustls::SignatureScheme::RSA_PKCS1_SHA256,
+			rustls::SignatureScheme::ED25519,
+		]
+	}
+}
+
+#[tokio::test]
+async fn handshakes_do_not_take_connection_capacity() {
+	let mock = simple_mock().await;
+	let (t, port) = serve_with_policy(
+		*mock.address(),
+		json!({ "http": { "http3": {} }, "tcp": { "maxConnections": 1 } }),
+	)
+	.await;
+
+	// A client whose handshake hangs, on its own runtime since the verifier blocks.
+	let stuck = std::thread::spawn(move || {
+		let rt = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.unwrap();
+		rt.block_on(async move {
+			let mut config =
+				rustls::ClientConfig::builder_with_provider(crate::transport::tls::provider())
+					.with_protocol_versions(&[&rustls::version::TLS13])
+					.unwrap()
+					.dangerous()
+					.with_custom_certificate_verifier(Arc::new(HangingVerifier(Duration::from_secs(3))))
+					.with_no_client_auth();
+			config.alpn_protocols = vec![b"h3".to_vec()];
+			let endpoint = client_endpoint(config).unwrap();
+			let res = endpoint
+				.connect(SocketAddr::from(([127, 0, 0, 1], port)), "a.example.com")
+				.unwrap()
+				.await;
+			assert!(res.is_err());
+		});
+	});
+	tokio::time::sleep(Duration::from_millis(500)).await;
+	assert!(!stuck.is_finished(), "the handshake is still in progress");
+
+	// The pending handshake does not hold the only connection slot.
+	let mut client = connect(port, "a.example.com").await;
+	assert_eq!(
+		client.get("https://a.example.com/").await.status,
+		StatusCode::OK
+	);
+	// The established connection does: a second one is closed once its handshake completes.
+	assert!(try_get(port, "a.example.com").await.is_err());
+	let shed = t
+		.pi
+		.metrics
+		.downstream_connections_shed
+		.get_or_create(&AdmissionLabels {
+			bind: Some(&BIND_KEY).into(),
+		})
+		.get();
+	assert_eq!(shed, 1);
+	stuck.join().unwrap();
+}
+
+#[test]
+fn address_validation_is_required_under_load() {
+	// Unvalidated clients are asked to retry once enough handshakes are pending.
+	assert!(!requires_address_validation(false, true, 127, 128));
+	assert!(requires_address_validation(false, true, 128, 128));
+	// A validated client, or one that already retried, is never asked again.
+	assert!(!requires_address_validation(true, true, 1000, 128));
+	assert!(!requires_address_validation(false, false, 1000, 128));
+	// Tests always validate, exercising the Retry path in every test.
+	assert!(requires_address_validation(
+		false,
+		true,
+		0,
+		ADDRESS_VALIDATION_THRESHOLD
+	));
+}
+
+#[test]
+fn transport_limits() {
+	let http3 = frontend::HTTP3::default();
+	let limits = TransportLimits::new(&http3, &frontend::HTTP::default());
+	assert_eq!(
+		limits,
+		TransportLimits {
+			max_concurrent_bidi_streams: 100,
+			max_concurrent_uni_streams: MAX_CONCURRENT_UNI_STREAMS,
+			receive_window: 1024 * 1024,
+			stream_receive_window: 256 * 1024,
+			idle_timeout: Duration::from_secs(30),
+		}
+	);
+	assert!(limits.transport_config().is_ok());
+
+	// The HTTP/2 flow-control windows of the frontend policy apply to QUIC too.
+	let http: frontend::HTTP = serde_json::from_value(json!({
+		"http2WindowSize": 65536,
+		"http2ConnectionWindowSize": 131072,
+		"http3": { "maxConcurrentStreams": 10, "idleTimeout": "5s" },
+	}))
+	.unwrap();
+	let limits = TransportLimits::new(http.http3.as_ref().unwrap(), &http);
+	assert_eq!(
+		limits,
+		TransportLimits {
+			max_concurrent_bidi_streams: 10,
+			max_concurrent_uni_streams: MAX_CONCURRENT_UNI_STREAMS,
+			receive_window: 131072,
+			stream_receive_window: 65536,
+			idle_timeout: Duration::from_secs(5),
+		}
+	);
 }
 
 #[test]
@@ -516,13 +1138,14 @@ fn connection_headers_are_stripped() {
 #[test]
 fn local_config_parses_http3() {
 	let http: frontend::HTTP = serde_json::from_value(json!({
-		"http3": {"altSvcMaxAge": "10m", "idleTimeout": "1m", "maxConcurrentStreams": 10}
+		"http3": {"altSvcMaxAge": "10m", "idleTimeout": "1m", "maxConcurrentStreams": 10, "altSvcPort": 443}
 	}))
 	.unwrap();
 	let http3 = http.http3.unwrap();
 	assert_eq!(http3.alt_svc_max_age(), Duration::from_secs(600));
 	assert_eq!(http3.idle_timeout(), Duration::from_secs(60));
-	assert_eq!(http3.max_concurrent_streams(), 10);
+	assert_eq!(http3.max_concurrent_streams().get(), 10);
+	assert_eq!(http3.alt_svc_port.map(|p| p.get()), Some(443));
 
 	let http: frontend::HTTP = serde_json::from_value(json!({"http3": {}})).unwrap();
 	let http3 = http.http3.unwrap();
@@ -535,10 +1158,17 @@ fn local_config_parses_http3() {
 		http3.max_concurrent_streams(),
 		frontend::HTTP3::DEFAULT_MAX_CONCURRENT_STREAMS
 	);
+	assert_eq!(http3.alt_svc_port, None);
 
 	let http: frontend::HTTP = serde_json::from_value(json!({})).unwrap();
 	assert!(http.http3.is_none());
 	assert!(serde_json::from_value::<frontend::HTTP>(json!({"http3": {"unknown": true}})).is_err());
+	// A connection that accepts no request is not useful.
+	assert!(
+		serde_json::from_value::<frontend::HTTP>(json!({"http3": {"maxConcurrentStreams": 0}}))
+			.is_err()
+	);
+	assert!(serde_json::from_value::<frontend::HTTP>(json!({"http3": {"altSvcPort": 0}})).is_err());
 }
 
 #[test]
@@ -585,11 +1215,7 @@ async fn listener_added_after_policy() {
 	let port = free_udp_port();
 	let mut bind = https_bind(port, server_tls(None));
 	bind.listeners = Arc::new(ListenerSet::default());
-	let mut t = setup_proxy_test("{}")
-		.unwrap()
-		.with_backend(*mock.address())
-		.with_bind(bind)
-		.with_route(basic_route(*mock.address()));
+	let mut t = test_with(*mock.address(), bind);
 	t.attach_frontend_policy(json!({ "http": { "http3": {} } }))
 		.await;
 	t.serve_http3(BIND_KEY);
