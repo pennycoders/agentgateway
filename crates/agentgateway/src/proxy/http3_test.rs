@@ -1118,6 +1118,7 @@ fn transport_limits() {
 			max_concurrent_uni_streams: MAX_CONCURRENT_UNI_STREAMS,
 			receive_window: 1024 * 1024,
 			stream_receive_window: 256 * 1024,
+			send_window: 1024 * 1024,
 			idle_timeout: Duration::from_secs(30),
 		}
 	);
@@ -1138,6 +1139,7 @@ fn transport_limits() {
 			max_concurrent_uni_streams: MAX_CONCURRENT_UNI_STREAMS,
 			receive_window: 131072,
 			stream_receive_window: 65536,
+			send_window: 4 * 65536,
 			idle_timeout: Duration::from_secs(5),
 		}
 	);
@@ -1573,4 +1575,33 @@ async fn listeners_with_their_own_tls_settings_are_not_served() {
 	let frontend_suites = json!({ "cipherSuites": ["TLS_AES_128_GCM_SHA256"] });
 	assert!(serves(restricted(), Some(frontend_suites.clone())).await);
 	assert!(serves(tls_with(None, None), Some(frontend_suites)).await);
+}
+
+#[test]
+fn handshakes_are_limited_per_source() {
+	let sources = SourceHandshakes::default();
+	let a: IpAddr = [192, 0, 2, 1].into();
+	let b: IpAddr = [192, 0, 2, 2].into();
+	let mut permits: Vec<_> = (0..3)
+		.map(|_| sources.try_acquire(a, 3).expect("under the limit"))
+		.collect();
+	assert!(sources.try_acquire(a, 3).is_none(), "one source is limited");
+	let other = sources.try_acquire(b, 3).expect("other sources are not");
+	permits.pop();
+	let _again = sources
+		.try_acquire(a, 3)
+		.expect("a completed handshake frees its slot");
+	drop(permits);
+	drop(other);
+	drop(_again);
+	assert_eq!(sources.len(), 0, "sources without handshakes are forgotten");
+}
+
+#[tokio::test]
+async fn connection_migration_is_disabled() {
+	let (_mock, t, _port) = setup_without_serving(Some(json!({})), server_tls(None)).await;
+	let desired = desired_state(&t.pi, &BIND_KEY).unwrap().unwrap();
+	// quinn only exposes the setting through Debug.
+	let config = format!("{:?}", desired.server_config);
+	assert!(config.contains("migration: false"), "{config}");
 }

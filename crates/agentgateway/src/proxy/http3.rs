@@ -74,6 +74,12 @@ const MAX_CONCURRENT_UNI_STREAMS: u32 = 8;
 /// Upper bound on the QUIC handshakes in progress per endpoint. Handshakes do not take a
 /// connection permit until they complete.
 const MAX_PENDING_HANDSHAKES: u32 = 1024;
+/// Upper bound on the QUIC handshakes in progress per client IP address, so a single client cannot
+/// take every handshake slot of the endpoint.
+const MAX_PENDING_HANDSHAKES_PER_SOURCE: u32 = 64;
+/// Bytes a stream may have buffered for sending, as a multiple of the stream flow-control window.
+/// quinn's default is unbounded relative to it.
+const SEND_WINDOW_STREAM_WINDOWS: u64 = 4;
 /// Once this many handshakes are in progress, clients must prove that they own their address with
 /// a Retry round trip (RFC 9000, section 8.1.2) before the server does any handshake work for
 /// them, so spoofed Initial packets cannot fill the handshake budget. Tests always validate.
@@ -255,20 +261,25 @@ struct TransportLimits {
 	max_concurrent_uni_streams: u32,
 	receive_window: u32,
 	stream_receive_window: u32,
+	send_window: u64,
 	idle_timeout: Duration,
 }
 
 impl TransportLimits {
 	fn new(settings: &frontend::HTTP3, http: &frontend::HTTP) -> Self {
+		let stream_receive_window = http
+			.http2_window_size
+			.unwrap_or(DEFAULT_STREAM_RECEIVE_WINDOW);
 		Self {
 			max_concurrent_bidi_streams: settings.max_concurrent_streams().get(),
 			max_concurrent_uni_streams: MAX_CONCURRENT_UNI_STREAMS,
 			receive_window: http
 				.http2_connection_window_size
 				.unwrap_or(DEFAULT_RECEIVE_WINDOW),
-			stream_receive_window: http
-				.http2_window_size
-				.unwrap_or(DEFAULT_STREAM_RECEIVE_WINDOW),
+			stream_receive_window,
+			// Bounds the response data buffered per connection, like the stream window bounds what a
+			// client may send.
+			send_window: u64::from(stream_receive_window) * SEND_WINDOW_STREAM_WINDOWS,
 			idle_timeout: settings.idle_timeout(),
 		}
 	}
@@ -280,6 +291,7 @@ impl TransportLimits {
 			.max_concurrent_uni_streams(self.max_concurrent_uni_streams.into())
 			.receive_window(self.receive_window.into())
 			.stream_receive_window(self.stream_receive_window.into())
+			.send_window(self.send_window)
 			// HTTP/3 datagrams (RFC 9297) are not supported; do not buffer any.
 			.datagram_receive_buffer_size(None)
 			.max_idle_timeout(Some(self.idle_timeout.try_into()?));
@@ -422,6 +434,11 @@ fn desired_state(pi: &ProxyInputs, bind_key: &BindKey) -> anyhow::Result<Option<
 	// 0-RTT data can be replayed; it stays disabled (rustls default).
 	let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls)?;
 	let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
+	// The client address is captured when the connection is established and is what network
+	// authorization, CEL, rate limits and logs see; a connection must not continue from another
+	// address (RFC 9000, section 9). With migration disabled, packets from other addresses are
+	// dropped.
+	server_config.migration(false);
 	let http = policies.http.clone().unwrap_or_default();
 	server_config.transport_config(Arc::new(
 		TransportLimits::new(settings, &http).transport_config()?,
@@ -458,6 +475,57 @@ struct Endpoint {
 	serving: bool,
 	/// Handshakes in progress.
 	handshakes: Limiter,
+	/// Handshakes in progress per client IP address.
+	source_handshakes: SourceHandshakes,
+}
+
+/// Counts the handshakes in progress per client IP address.
+#[derive(Debug, Default, Clone)]
+struct SourceHandshakes(Arc<std::sync::Mutex<HashMap<std::net::IpAddr, u32>>>);
+
+impl SourceHandshakes {
+	fn try_acquire(&self, source: std::net::IpAddr, max: u32) -> Option<SourcePermit> {
+		let mut sources = self.0.lock().expect("handshake sources poisoned");
+		let count = sources.entry(source).or_default();
+		if *count >= max {
+			return None;
+		}
+		*count += 1;
+		Some(SourcePermit {
+			sources: self.clone(),
+			source,
+		})
+	}
+
+	#[cfg(test)]
+	fn len(&self) -> usize {
+		self.0.lock().expect("handshake sources poisoned").len()
+	}
+}
+
+/// A handshake in progress from one client IP address.
+#[derive(Debug)]
+struct SourcePermit {
+	sources: SourceHandshakes,
+	source: std::net::IpAddr,
+}
+
+impl Drop for SourcePermit {
+	fn drop(&mut self) {
+		let mut sources = self.sources.0.lock().expect("handshake sources poisoned");
+		if let Some(count) = sources.get_mut(&self.source) {
+			*count -= 1;
+			if *count == 0 {
+				sources.remove(&self.source);
+			}
+		}
+	}
+}
+
+/// The handshake budget a connection holds until its handshake completes.
+struct HandshakePermit {
+	_endpoint: Permit,
+	_source: SourcePermit,
 }
 
 impl Endpoint {
@@ -480,6 +548,7 @@ impl Endpoint {
 			retired: watch::channel(false).0,
 			serving: true,
 			handshakes: Default::default(),
+			source_handshakes: Default::default(),
 		})
 	}
 
@@ -690,6 +759,27 @@ async fn supervise(
 						incoming.refuse();
 						continue;
 					};
+					let Some(source_handshake) = e
+						.source_handshakes
+						.try_acquire(peer_addr.ip(), MAX_PENDING_HANDSHAKES_PER_SOURCE)
+					else {
+						if !incoming.remote_address_validated() && incoming.may_retry() {
+							// The address may be spoofed to exhaust the budget of its owner; only a
+							// client that proves it owns the address competes for it.
+							if let Err(err) = incoming.retry() {
+								err.into_incoming().refuse();
+							}
+						} else {
+							connection_shed.inc();
+							debug!(bind=%bind_key, src.addr=%peer_addr, "downstream QUIC connection rejected: too many handshakes from the client address");
+							incoming.refuse();
+						}
+						continue;
+					};
+					let handshake = HandshakePermit {
+						_endpoint: handshake,
+						_source: source_handshake,
+					};
 					let connection = Connection {
 						pi: pi.clone(),
 						bind_key: bind_key.clone(),
@@ -813,7 +903,7 @@ struct Connection {
 }
 
 impl Connection {
-	async fn serve(self, incoming: quinn::Incoming, handshake: Permit) {
+	async fn serve(self, incoming: quinn::Incoming, handshake: HandshakePermit) {
 		let peer_addr = self.peer_addr;
 		let handshake_timeout = self
 			.policies
