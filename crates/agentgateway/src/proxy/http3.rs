@@ -75,6 +75,8 @@ const DEFAULT_STREAM_RECEIVE_WINDOW: u32 = 1280 * 1024;
 /// and QPACK encoder and decoder streams (RFC 9204, section 4.2), plus room for reserved stream
 /// types used for greasing (RFC 9114, section 6.2.3). Push streams are server-initiated.
 const MAX_CONCURRENT_UNI_STREAMS: u32 = 8;
+/// Size requested for the receive and send buffers of the UDP socket.
+const UDP_SOCKET_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 /// Upper bound on the QUIC handshakes in progress per endpoint. Handshakes do not take a
 /// connection permit until they complete.
 const MAX_PENDING_HANDSHAKES: u32 = 1024;
@@ -508,6 +510,28 @@ impl Drop for SourcePermit {
 	}
 }
 
+/// Asks for UDP socket buffers of [`UDP_SOCKET_BUFFER_SIZE`]. The kernel defaults (around 200 KiB
+/// on Linux) hold fewer packets than a single connection may have in flight with its flow-control
+/// windows, so bursts arriving faster than the endpoint reads them would be dropped and resent.
+/// Raising the buffers is best effort: the kernel caps them, on Linux at `net.core.rmem_max` and
+/// `net.core.wmem_max`, and the endpoint is served with whatever it grants.
+fn set_socket_buffers(socket: &std::net::UdpSocket, address: SocketAddr) {
+	let socket = socket2::SockRef::from(socket);
+	if let Err(e) = socket.set_recv_buffer_size(UDP_SOCKET_BUFFER_SIZE) {
+		debug!(%address, "could not raise the UDP receive buffer: {e}");
+	}
+	if let Err(e) = socket.set_send_buffer_size(UDP_SOCKET_BUFFER_SIZE) {
+		debug!(%address, "could not raise the UDP send buffer: {e}");
+	}
+	// Linux reports twice the size that was granted, as it includes its bookkeeping overhead.
+	debug!(
+		%address,
+		recv_buffer = socket.recv_buffer_size().ok(),
+		send_buffer = socket.send_buffer_size().ok(),
+		"UDP socket buffer sizes"
+	);
+}
+
 /// The handshake budget a connection holds until its handshake completes.
 struct HandshakePermit {
 	_endpoint: Permit,
@@ -521,6 +545,7 @@ impl Endpoint {
 		served: Arc<ServedListeners>,
 	) -> anyhow::Result<Self> {
 		let socket = std::net::UdpSocket::bind(address)?;
+		set_socket_buffers(&socket, address);
 		let endpoint = quinn::Endpoint::new(
 			quinn::EndpointConfig::default(),
 			Some((*server_config).clone()),
