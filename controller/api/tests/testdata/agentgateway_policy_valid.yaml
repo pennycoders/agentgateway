@@ -316,6 +316,7 @@ spec:
         maxConcurrentStreams: 100
         altSvcPort: 443
         requestHeaderTimeout: 30s
+        keepAliveInterval: 15s
 ---
 apiVersion: agentgateway.dev/v1alpha1
 kind: AgentgatewayPolicy

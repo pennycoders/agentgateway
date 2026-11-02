@@ -10906,6 +10906,14 @@
             "null"
           ],
           "default": null
+        },
+        "keepAliveInterval": {
+          "description": "Interval at which the gateway sends QUIC PING frames on idle connections, for clients behind\nNATs that drop UDP mappings after a short time. Idle connections then stay open while the\nclient answers, and `idleTimeout` only closes those whose client went away. Disabled when\nunset. Must not be zero, and must be shorter than `idleTimeout`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         }
       },
       "additionalProperties": false

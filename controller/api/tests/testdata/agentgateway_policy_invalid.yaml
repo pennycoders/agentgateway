@@ -382,6 +382,52 @@ spec:
       http3:
         requestHeaderTimeout: 500ms
 ---
+_err: 'http.http3.keepAliveInterval'
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: frontend-http3-keep-alive-short
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: dummy
+  frontend:
+    http:
+      http3:
+        keepAliveInterval: 500ms
+---
+_err: 'keepAliveInterval must be shorter than idleTimeout'
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: frontend-http3-keep-alive-idle
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: dummy
+  frontend:
+    http:
+      http3:
+        idleTimeout: 10s
+        keepAliveInterval: 10s
+---
+_err: 'keepAliveInterval must be shorter than idleTimeout'
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: frontend-http3-keep-alive-default-idle
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: dummy
+  frontend:
+    http:
+      http3:
+        keepAliveInterval: 30s
+---
 _err: 'http.http3.altSvcMaxAge'
 apiVersion: agentgateway.dev/v1alpha1
 kind: AgentgatewayPolicy

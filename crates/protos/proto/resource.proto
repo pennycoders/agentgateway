@@ -786,6 +786,11 @@ message FrontendPolicySpec {
       // How long a client may take to send the headers of a request on a new
       // request stream. Defaults to 30s.
       google.protobuf.Duration request_header_timeout = 5;
+      // Interval at which the gateway sends QUIC PING frames on idle connections,
+      // for clients behind NATs that drop UDP mappings after a short time. Idle
+      // connections then stay open while the client answers. Unset sends none.
+      // Must not be zero, and must be shorter than idle_timeout.
+      google.protobuf.Duration keep_alive_interval = 6;
     }
     // Serve HTTP/3 (QUIC) on the UDP port matching each HTTPS listener of the bind,
     // and advertise it with Alt-Svc. Unset disables HTTP/3.

@@ -145,6 +145,17 @@ pub struct HTTP3 {
 	#[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
 	#[serde(default)]
 	pub request_header_timeout: Option<Duration>,
+	/// Interval at which the gateway sends QUIC PING frames on idle connections, for clients behind
+	/// NATs that drop UDP mappings after a short time. Idle connections then stay open while the
+	/// client answers, and `idleTimeout` only closes those whose client went away. Disabled when
+	/// unset. Must not be zero, and must be shorter than `idleTimeout`.
+	#[serde(
+		serialize_with = "serde_dur_option::serialize",
+		deserialize_with = "deserialize_nonzero_duration"
+	)]
+	#[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
+	#[serde(default)]
+	pub keep_alive_interval: Option<Duration>,
 }
 
 fn deserialize_nonzero_duration<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>

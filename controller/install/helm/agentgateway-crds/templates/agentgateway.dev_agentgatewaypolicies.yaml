@@ -7267,6 +7267,19 @@ spec:
                             x-kubernetes-validations:
                             - message: idleTimeout must be at least 1 second
                               rule: duration(self) >= duration('1s')
+                          keepAliveInterval:
+                            description: |-
+                              Interval at which the gateway sends QUIC PING frames on idle
+                              connections, for clients behind NATs that drop UDP mappings after a
+                              short time. Idle connections then stay open while the client answers,
+                              and `idleTimeout` only closes those whose client went away.
+                              It must be shorter than `idleTimeout`. If unset, no keep-alives are sent.
+                            maxLength: 32
+                            pattern: ^([0-9]{1,5}(h|m|s|ms)){1,4}$
+                            type: string
+                            x-kubernetes-validations:
+                            - message: keepAliveInterval must be at least 1 second
+                              rule: duration(self) >= duration('1s')
                           maxConcurrentStreams:
                             description: |-
                               Maximum number of concurrent request streams per QUIC connection.
@@ -7287,6 +7300,11 @@ spec:
                             - message: requestHeaderTimeout must be at least 1 second
                               rule: duration(self) >= duration('1s')
                         type: object
+                        x-kubernetes-validations:
+                        - message: keepAliveInterval must be shorter than idleTimeout
+                          rule: '!has(self.keepAliveInterval) || duration(self.keepAliveInterval)
+                            < (has(self.idleTimeout) ? duration(self.idleTimeout)
+                            : duration(''30s''))'
                       maxBufferSize:
                         anyOf:
                         - type: integer

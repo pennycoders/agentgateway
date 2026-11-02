@@ -259,6 +259,7 @@ struct TransportLimits {
 	stream_receive_window: u32,
 	send_window: u64,
 	idle_timeout: Duration,
+	keep_alive_interval: Option<Duration>,
 }
 
 impl TransportLimits {
@@ -272,10 +273,20 @@ impl TransportLimits {
 			// a client may send.
 			send_window: u64::from(DEFAULT_STREAM_RECEIVE_WINDOW) * SEND_WINDOW_STREAM_WINDOWS,
 			idle_timeout: settings.idle_timeout(),
+			keep_alive_interval: settings.keep_alive_interval,
 		}
 	}
 
 	fn transport_config(&self) -> anyhow::Result<quinn::TransportConfig> {
+		// Keep-alives sent no sooner than the idle timeout would not keep a connection open.
+		if let Some(interval) = self.keep_alive_interval
+			&& (interval.is_zero() || interval >= self.idle_timeout)
+		{
+			anyhow::bail!(
+				"http3 keepAliveInterval ({interval:?}) must be shorter than idleTimeout ({:?})",
+				self.idle_timeout
+			);
+		}
 		let mut transport = quinn::TransportConfig::default();
 		transport
 			.max_concurrent_bidi_streams(self.max_concurrent_bidi_streams.into())
@@ -285,7 +296,8 @@ impl TransportLimits {
 			.send_window(self.send_window)
 			// HTTP/3 datagrams (RFC 9297) are not supported; do not buffer any.
 			.datagram_receive_buffer_size(None)
-			.max_idle_timeout(Some(self.idle_timeout.try_into()?));
+			.max_idle_timeout(Some(self.idle_timeout.try_into()?))
+			.keep_alive_interval(self.keep_alive_interval);
 		Ok(transport)
 	}
 }

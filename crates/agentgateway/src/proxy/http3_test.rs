@@ -400,6 +400,24 @@ async fn large_response_body_is_delivered() {
 }
 
 #[tokio::test]
+async fn keep_alive_keeps_idle_connections_open() {
+	let mock = simple_mock().await;
+	let (_t, port) = serve_with_policy(
+		*mock.address(),
+		json!({ "http": { "http3": { "idleTimeout": "1s", "keepAliveInterval": "200ms" } } }),
+	)
+	.await;
+	let mut client = connect(port, "a.example.com").await;
+	// Well past the idle timeout, which applies to both ends of the connection.
+	tokio::time::sleep(Duration::from_millis(2500)).await;
+	assert!(client.conn.close_reason().is_none());
+	assert_eq!(
+		client.get("https://a.example.com/").await.status,
+		StatusCode::OK
+	);
+}
+
+#[tokio::test]
 async fn content_length_must_match_the_body() {
 	let (mock, t, port) = setup(Some(json!({}))).await;
 	wait_for_http3(&t, true).await;
@@ -1151,6 +1169,7 @@ fn transport_limits() {
 			stream_receive_window: 1280 * 1024,
 			send_window: 10 * 1024 * 1024,
 			idle_timeout: Duration::from_secs(30),
+			keep_alive_interval: None,
 		}
 	);
 	assert!(limits.transport_config().is_ok());
@@ -1171,6 +1190,25 @@ fn transport_limits() {
 			..TransportLimits::new(&http3)
 		}
 	);
+
+	// Keep-alives must be sent before the idle timeout closes the connection.
+	let limits = |keep_alive: &str| {
+		let http3: frontend::HTTP3 =
+			serde_json::from_value(json!({ "idleTimeout": "10s", "keepAliveInterval": keep_alive }))
+				.unwrap();
+		TransportLimits::new(&http3)
+	};
+	assert_eq!(
+		limits("5s").keep_alive_interval,
+		Some(Duration::from_secs(5))
+	);
+	assert!(limits("5s").transport_config().is_ok());
+	assert!(limits("10s").transport_config().is_err());
+	assert!(limits("1m").transport_config().is_err());
+	// The default idle timeout applies when it is unset.
+	let http3: frontend::HTTP3 =
+		serde_json::from_value(json!({ "keepAliveInterval": "30s" })).unwrap();
+	assert!(TransportLimits::new(&http3).transport_config().is_err());
 }
 
 #[test]
@@ -1235,6 +1273,10 @@ fn local_config_parses_http3() {
 	);
 	assert!(
 		serde_json::from_value::<frontend::HTTP>(json!({"http3": {"requestHeaderTimeout": "0s"}}))
+			.is_err()
+	);
+	assert!(
+		serde_json::from_value::<frontend::HTTP>(json!({"http3": {"keepAliveInterval": "0s"}}))
 			.is_err()
 	);
 }

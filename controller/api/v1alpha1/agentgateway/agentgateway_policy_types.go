@@ -852,6 +852,7 @@ type FrontendHTTP struct {
 	HTTP3 *FrontendHTTP3 `json:"http3,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="!has(self.keepAliveInterval) || duration(self.keepAliveInterval) < (has(self.idleTimeout) ? duration(self.idleTimeout) : duration('30s'))",message="keepAliveInterval must be shorter than idleTimeout"
 type FrontendHTTP3 struct {
 	// How long clients may cache the `Alt-Svc` advertisement.
 	// If unset, this defaults to 24 hours.
@@ -883,6 +884,14 @@ type FrontendHTTP3 struct {
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s')",message="requestHeaderTimeout must be at least 1 second"
 	// +optional
 	RequestHeaderTimeout *Duration `json:"requestHeaderTimeout,omitempty"`
+	// Interval at which the gateway sends QUIC PING frames on idle
+	// connections, for clients behind NATs that drop UDP mappings after a
+	// short time. Idle connections then stay open while the client answers,
+	// and `idleTimeout` only closes those whose client went away.
+	// It must be shorter than `idleTimeout`. If unset, no keep-alives are sent.
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s')",message="keepAliveInterval must be at least 1 second"
+	// +optional
+	KeepAliveInterval *Duration `json:"keepAliveInterval,omitempty"`
 }
 
 // +kubebuilder:validation:AtLeastOneFieldSet

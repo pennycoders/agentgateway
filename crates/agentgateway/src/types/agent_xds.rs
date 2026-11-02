@@ -3577,6 +3577,7 @@ fn frontend_policy_from_proto(
 						alt_svc_max_age: h3.alt_svc_max_age.map(convert_duration),
 						idle_timeout: nonzero("idleTimeout", h3.idle_timeout)?,
 						request_header_timeout: nonzero("requestHeaderTimeout", h3.request_header_timeout)?,
+						keep_alive_interval: nonzero("keepAliveInterval", h3.keep_alive_interval)?,
 						max_concurrent_streams: h3
 							.max_concurrent_streams
 							.and_then(std::num::NonZeroU32::new),
@@ -6634,6 +6635,10 @@ mod tests {
 				seconds: 5,
 				nanos: 0,
 			}),
+			keep_alive_interval: Some(prost_types::Duration {
+				seconds: 3,
+				nanos: 0,
+			}),
 		}));
 		let FrontendPolicy::HTTP(enabled) = frontend_policy_from_proto(&spec, &mut diag)? else {
 			panic!("Expected HTTP policy variant");
@@ -6646,6 +6651,7 @@ mod tests {
 				max_concurrent_streams: std::num::NonZeroU32::new(50),
 				alt_svc_port: std::num::NonZeroU16::new(8443),
 				request_header_timeout: Some(Duration::from_secs(5)),
+				keep_alive_interval: Some(Duration::from_secs(3)),
 			})
 		);
 
@@ -6666,6 +6672,10 @@ mod tests {
 			},
 			fps::http::Http3 {
 				request_header_timeout: Some(prost_types::Duration::default()),
+				..Default::default()
+			},
+			fps::http::Http3 {
+				keep_alive_interval: Some(prost_types::Duration::default()),
 				..Default::default()
 			},
 		] {
