@@ -381,6 +381,25 @@ async fn request_body_is_forwarded() {
 }
 
 #[tokio::test]
+async fn large_response_body_is_delivered() {
+	// Larger than the connection flow-control and send windows, so the download only completes
+	// if both are replenished as the client reads.
+	let body: Vec<u8> = (0..24 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+	let mock = wiremock::MockServer::start().await;
+	wiremock::Mock::given(wiremock::matchers::any())
+		.respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(body.clone()))
+		.mount(&mock)
+		.await;
+	let (_t, port) = serve_with_policy(*mock.address(), json!({ "http": { "http3": {} } })).await;
+
+	let mut client = connect(port, "a.example.com").await;
+	let resp = client.get("https://a.example.com/large").await;
+	assert_eq!(resp.status, StatusCode::OK);
+	assert_eq!(resp.body.len(), body.len());
+	assert!(resp.body == body);
+}
+
+#[tokio::test]
 async fn content_length_must_match_the_body() {
 	let (mock, t, port) = setup(Some(json!({}))).await;
 	wait_for_http3(&t, true).await;
@@ -1122,37 +1141,34 @@ fn address_validation_is_required_under_load() {
 #[test]
 fn transport_limits() {
 	let http3 = frontend::HTTP3::default();
-	let limits = TransportLimits::new(&http3, &frontend::HTTP::default());
+	let limits = TransportLimits::new(&http3);
 	assert_eq!(
 		limits,
 		TransportLimits {
 			max_concurrent_bidi_streams: 100,
 			max_concurrent_uni_streams: MAX_CONCURRENT_UNI_STREAMS,
-			receive_window: 1024 * 1024,
-			stream_receive_window: 256 * 1024,
-			send_window: 1024 * 1024,
+			receive_window: 10 * 1024 * 1024,
+			stream_receive_window: 1280 * 1024,
+			send_window: 10 * 1024 * 1024,
 			idle_timeout: Duration::from_secs(30),
 		}
 	);
 	assert!(limits.transport_config().is_ok());
 
-	// The HTTP/2 flow-control windows of the frontend policy apply to QUIC too.
+	// The HTTP/2 flow-control windows of the frontend policy do not apply to QUIC.
 	let http: frontend::HTTP = serde_json::from_value(json!({
 		"http2WindowSize": 65536,
 		"http2ConnectionWindowSize": 131072,
 		"http3": { "maxConcurrentStreams": 10, "idleTimeout": "5s" },
 	}))
 	.unwrap();
-	let limits = TransportLimits::new(http.http3.as_ref().unwrap(), &http);
+	let limits = TransportLimits::new(http.http3.as_ref().unwrap());
 	assert_eq!(
 		limits,
 		TransportLimits {
 			max_concurrent_bidi_streams: 10,
-			max_concurrent_uni_streams: MAX_CONCURRENT_UNI_STREAMS,
-			receive_window: 131072,
-			stream_receive_window: 65536,
-			send_window: 4 * 65536,
 			idle_timeout: Duration::from_secs(5),
+			..TransportLimits::new(&http3)
 		}
 	);
 }

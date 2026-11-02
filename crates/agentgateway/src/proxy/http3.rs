@@ -61,12 +61,16 @@ use crate::{ProxyInputs, client};
 const H3_ALPN: &[u8] = b"h3";
 /// Default limit on the size of request headers, matching the HTTP/2 default.
 const DEFAULT_MAX_FIELD_SECTION_SIZE: u64 = 16 * 1024;
-/// Default QUIC connection flow-control window (RFC 9000, section 4), used unless the frontend
-/// policy sets `http2ConnectionWindowSize`. quinn's own default is unbounded.
-const DEFAULT_RECEIVE_WINDOW: u32 = 1024 * 1024;
-/// Default QUIC stream flow-control window, used unless the frontend policy sets
-/// `http2WindowSize`.
-const DEFAULT_STREAM_RECEIVE_WINDOW: u32 = 256 * 1024;
+/// QUIC connection flow-control window (RFC 9000, section 4): the request data a client may have
+/// in flight on all streams of a connection together. It bounds what a connection buffers before
+/// the request bodies are read: 8 stream windows (10 MiB), where the default limit of 100
+/// concurrent streams would otherwise allow 100 (125 MiB). quinn's own default is unbounded.
+/// The HTTP/2 flow-control windows of the frontend policy do not apply to QUIC.
+const DEFAULT_RECEIVE_WINDOW: u32 = 8 * DEFAULT_STREAM_RECEIVE_WINDOW;
+/// QUIC stream flow-control window (RFC 9000, section 4). A stream sends at most one window per
+/// round trip, so the window must cover the bandwidth-delay product of the path: like quinn's
+/// default, 1.25 MiB covers 100 Mbit/s at a 100 ms round trip (12.5 MB/s x 0.1 s).
+const DEFAULT_STREAM_RECEIVE_WINDOW: u32 = 1280 * 1024;
 /// Unidirectional streams a client may open at once: its control stream (RFC 9114, section 6.2.1)
 /// and QPACK encoder and decoder streams (RFC 9204, section 4.2), plus room for reserved stream
 /// types used for greasing (RFC 9114, section 6.2.3). Push streams are server-initiated.
@@ -77,9 +81,11 @@ const MAX_PENDING_HANDSHAKES: u32 = 1024;
 /// Upper bound on the QUIC handshakes in progress per client IP address, so a single client cannot
 /// take every handshake slot of the endpoint.
 const MAX_PENDING_HANDSHAKES_PER_SOURCE: u32 = 64;
-/// Bytes a stream may have buffered for sending, as a multiple of the stream flow-control window.
-/// quinn's default is unbounded relative to it.
-const SEND_WINDOW_STREAM_WINDOWS: u64 = 4;
+/// Response data a connection may have sent but not yet acknowledged, as a multiple of the stream
+/// flow-control window. Like quinn's default, 8 stream windows (10 MiB), so a few large downloads
+/// on one connection each get a full window per round trip, while what a connection buffers for
+/// sending stays bounded however much flow-control credit the client grants.
+const SEND_WINDOW_STREAM_WINDOWS: u64 = 8;
 /// Once this many handshakes are in progress, clients must prove that they own their address with
 /// a Retry round trip (RFC 9000, section 8.1.2) before the server does any handshake work for
 /// them, so spoofed Initial packets cannot fill the handshake budget. Tests always validate.
@@ -254,20 +260,15 @@ struct TransportLimits {
 }
 
 impl TransportLimits {
-	fn new(settings: &frontend::HTTP3, http: &frontend::HTTP) -> Self {
-		let stream_receive_window = http
-			.http2_window_size
-			.unwrap_or(DEFAULT_STREAM_RECEIVE_WINDOW);
+	fn new(settings: &frontend::HTTP3) -> Self {
 		Self {
 			max_concurrent_bidi_streams: settings.max_concurrent_streams().get(),
 			max_concurrent_uni_streams: MAX_CONCURRENT_UNI_STREAMS,
-			receive_window: http
-				.http2_connection_window_size
-				.unwrap_or(DEFAULT_RECEIVE_WINDOW),
-			stream_receive_window,
-			// Bounds the response data buffered per connection, like the stream window bounds what a
-			// client may send.
-			send_window: u64::from(stream_receive_window) * SEND_WINDOW_STREAM_WINDOWS,
+			receive_window: DEFAULT_RECEIVE_WINDOW,
+			stream_receive_window: DEFAULT_STREAM_RECEIVE_WINDOW,
+			// Bounds the response data buffered per connection, like the connection window bounds what
+			// a client may send.
+			send_window: u64::from(DEFAULT_STREAM_RECEIVE_WINDOW) * SEND_WINDOW_STREAM_WINDOWS,
 			idle_timeout: settings.idle_timeout(),
 		}
 	}
@@ -427,10 +428,7 @@ fn desired_state(pi: &ProxyInputs, bind_key: &BindKey) -> anyhow::Result<Option<
 	// address (RFC 9000, section 9). With migration disabled, packets from other addresses are
 	// dropped.
 	server_config.migration(false);
-	let http = policies.http.clone().unwrap_or_default();
-	server_config.transport_config(Arc::new(
-		TransportLimits::new(settings, &http).transport_config()?,
-	));
+	server_config.transport_config(Arc::new(TransportLimits::new(settings).transport_config()?));
 
 	let max_age = settings.alt_svc_max_age();
 	let port = settings

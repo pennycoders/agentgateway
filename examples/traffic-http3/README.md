@@ -41,7 +41,7 @@ Note the `-k` to disable TLS verification, as the example certificate is self-si
 HTTP/3 is only served for HTTPS listeners that do not verify client certificates, and it requires TLS 1.3.
 One QUIC endpoint serves every HTTPS listener of the bind with the TLS settings of the frontend `tls` policy, so listeners whose own TLS versions, cipher suites or key exchange groups differ are not served over HTTP/3.
 It is not served on binds that use the PROXY protocol, a CONNECT tunnel, or another tunnel protocol, since these change the TCP stream before HTTP and have no QUIC equivalent.
-The `idleTimeout`, `maxConcurrentStreams` and `requestHeaderTimeout` fields tune the QUIC connections; the HTTP/2 flow-control windows (`http2WindowSize`, `http2ConnectionWindowSize`) also bound QUIC flow control.
+The `idleTimeout`, `maxConcurrentStreams` and `requestHeaderTimeout` fields tune the QUIC connections; the HTTP/2 flow-control windows (`http2WindowSize`, `http2ConnectionWindowSize`) do not apply to QUIC, whose flow-control windows are sized for 100 Mbit/s at a 100 ms round trip per stream.
 
 When HTTP/3 is disabled again, responses carry `Alt-Svc: clear` for the advertised `altSvcMaxAge`, so clients forget the cached advertisement.
 
