@@ -26,8 +26,9 @@ use quinn::VarInt;
 type BoxStream<T> = Pin<Box<dyn Stream<Item = T> + Send + Sync>>;
 
 /// Resolves when the client stops reading a response (`Some` with its error code) or acknowledged
-/// all of it (`None`). It also resolves (with `Some`) when the connection is lost.
-pub(super) type Stopped = Pin<Box<dyn Future<Output = Option<VarInt>> + Send + Sync>>;
+/// all of it (`None`), or with the error that closed the connection.
+pub(super) type Stopped =
+	Pin<Box<dyn Future<Output = Result<Option<VarInt>, quinn::StoppedError>> + Send + Sync>>;
 
 /// Observes and controls one request stream while `h3` owns it.
 pub(super) struct StreamHandle {
@@ -333,15 +334,8 @@ pub(super) struct SendStream<B: Buf> {
 impl<B: Buf> SendStream<B> {
 	fn new(stream: quinn::SendStream, codes: Arc<StreamCodes>, streams: &StreamRegistry) -> Self {
 		let id = stream_id(stream.id());
-		let stopped = stream.stopped();
 		streams.accepted(StreamHandle {
-			stopped: Box::pin(async move {
-				match stopped.await {
-					Ok(code) => code,
-					// The connection is gone; nobody reads the response anymore.
-					Err(_) => Some(varint(Code::H3_REQUEST_CANCELLED)),
-				}
-			}),
+			stopped: Box::pin(stream.stopped()),
 			codes: codes.clone(),
 		});
 		Self {

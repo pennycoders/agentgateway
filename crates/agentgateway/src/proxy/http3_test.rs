@@ -417,6 +417,64 @@ async fn keep_alive_keeps_idle_connections_open() {
 	);
 }
 
+/// A raw HTTP/1.1 backend that answers every request after `delay`, sending nothing before.
+async fn silent_backend(delay: Duration) -> SocketAddr {
+	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let addr = listener.local_addr().unwrap();
+	tokio::spawn(async move {
+		while let Ok((mut conn, _)) = listener.accept().await {
+			tokio::spawn(async move {
+				read_request_head(&mut conn).await;
+				tokio::time::sleep(delay).await;
+				let _ = conn
+					.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+					.await;
+			});
+		}
+	});
+	addr
+}
+
+#[tokio::test]
+async fn requests_in_flight_keep_the_connection_open() {
+	// The backend stays silent for longer than the idle timeout, and the client sends no
+	// keep-alives of its own: the connection must not time out while the request is in flight.
+	let backend = silent_backend(Duration::from_millis(2500)).await;
+	let (_t, port) = serve_with_policy(
+		backend,
+		json!({ "http": { "http3": { "idleTimeout": "1s" } } }),
+	)
+	.await;
+	let mut client = connect(port, "a.example.com").await;
+	let resp = tokio::time::timeout(
+		Duration::from_secs(10),
+		client.get("https://a.example.com/"),
+	)
+	.await
+	.expect("the response arrives");
+	assert_eq!(resp.status, StatusCode::OK);
+	assert_eq!(&resp.body[..], b"ok");
+}
+
+#[tokio::test]
+async fn idle_connections_close_at_the_idle_timeout() {
+	let mock = simple_mock().await;
+	let (_t, port) = serve_with_policy(
+		*mock.address(),
+		json!({ "http": { "http3": { "idleTimeout": "1s" } } }),
+	)
+	.await;
+	let mut client = connect(port, "a.example.com").await;
+	assert_eq!(
+		client.get("https://a.example.com/").await.status,
+		StatusCode::OK
+	);
+	// Without requests, the connection closes once the idle timeout passed, gracefully.
+	let started = std::time::Instant::now();
+	expect_graceful_close(client).await;
+	assert!(started.elapsed() < Duration::from_secs(3));
+}
+
 #[tokio::test]
 async fn content_length_must_match_the_body() {
 	let (mock, t, port) = setup(Some(json!({}))).await;

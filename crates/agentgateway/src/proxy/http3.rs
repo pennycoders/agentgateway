@@ -294,6 +294,16 @@ impl TransportLimits {
 		}
 	}
 
+	/// Without a configured interval, PINGs keep connections with requests in flight open, and
+	/// [`Connection`] closes those without requests after the idle timeout.
+	fn transport_keep_alive_interval(&self) -> Duration {
+		self.keep_alive_interval.unwrap_or(self.idle_timeout / 2)
+	}
+
+	fn closes_idle_connections(&self) -> bool {
+		self.keep_alive_interval.is_none()
+	}
+
 	fn transport_config(&self) -> anyhow::Result<quinn::TransportConfig> {
 		// Keep-alives sent no sooner than the idle timeout would not keep a connection open.
 		if let Some(interval) = self.keep_alive_interval
@@ -314,7 +324,7 @@ impl TransportLimits {
 			// HTTP/3 datagrams (RFC 9297) are not supported; do not buffer any.
 			.datagram_receive_buffer_size(None)
 			.max_idle_timeout(Some(self.idle_timeout.try_into()?))
-			.keep_alive_interval(self.keep_alive_interval);
+			.keep_alive_interval(Some(self.transport_keep_alive_interval()));
 		if let Some(factory) = self.congestion_controller_factory() {
 			transport.congestion_controller_factory(factory);
 		}
@@ -1129,6 +1139,10 @@ impl Connection {
 		let mut draining = false;
 		let mut requests = JoinSet::new();
 		let connection_id = telemetry::current_connection_id();
+		let idle_timeout = settings.idle_timeout();
+		let close_idle = TransportLimits::new(&settings).closes_idle_connections();
+		let idle = tokio::time::sleep(idle_timeout);
+		tokio::pin!(idle);
 		loop {
 			tokio::select! {
 				_ = force_shutdown.changed() => {
@@ -1157,7 +1171,16 @@ impl Connection {
 					draining = true;
 					h3.shutdown(1).await?;
 				},
-				Some(_) = requests.join_next(), if !requests.is_empty() => {},
+				Some(_) = requests.join_next(), if !requests.is_empty() => {
+					if requests.is_empty() {
+						idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
+					}
+				},
+				_ = &mut idle, if close_idle && !draining && requests.is_empty() => {
+					debug!(bind=%bind_key, "HTTP/3 connection idle timeout, closing it");
+					draining = true;
+					h3.shutdown(1).await?;
+				},
 				_ = std::future::ready(()), if draining && requests.is_empty() => break,
 				res = h3.accept() => match res {
 					Ok(Some(resolver)) => {
@@ -1322,8 +1345,14 @@ async fn serve_request(
 	// Stop proxying once the client cancels the request (RFC 9114, section 4.1.1).
 	let response = tokio::select! {
 		response = response => response,
-		code = &mut handle.stopped => {
-			debug!(code=?code, "HTTP/3 request cancelled by the client");
+		stopped = &mut handle.stopped => {
+			match stopped {
+				Ok(code) => debug!(code=?code, "HTTP/3 request cancelled by the client"),
+				Err(quinn::StoppedError::ConnectionLost(quinn::ConnectionError::TimedOut)) => {
+					debug!("HTTP/3 request aborted: the connection reached its idle timeout")
+				},
+				Err(e) => debug!("HTTP/3 request aborted: {e}"),
+			}
 			handle.abort_on_drop(Code::H3_REQUEST_CANCELLED);
 			return;
 		},
