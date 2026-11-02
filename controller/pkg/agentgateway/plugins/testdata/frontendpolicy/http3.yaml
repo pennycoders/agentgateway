@@ -41,6 +41,7 @@ spec:
         altSvcPort: 443
         requestHeaderTimeout: 10s
         keepAliveInterval: 15s
+        congestionControl: BBR
 ---
 apiVersion: agentgateway.dev/v1alpha1
 kind: AgentgatewayPolicy
@@ -86,6 +87,7 @@ output:
           http3:
             altSvcMaxAge: 3600s
             altSvcPort: 443
+            congestionControl: BBR
             idleTimeout: 45s
             keepAliveInterval: 15s
             maxConcurrentStreams: 50

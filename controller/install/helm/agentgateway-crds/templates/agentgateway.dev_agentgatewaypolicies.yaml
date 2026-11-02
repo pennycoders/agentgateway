@@ -7257,6 +7257,16 @@ spec:
                             maximum: 65535
                             minimum: 1
                             type: integer
+                          congestionControl:
+                            description: |-
+                              Congestion controller of QUIC connections. `BBR` is experimental in
+                              the QUIC implementation of the gateway.
+                              If unset, this defaults to `Cubic`.
+                            enum:
+                            - BBR
+                            - Cubic
+                            - NewReno
+                            type: string
                           idleTimeout:
                             description: |-
                               How long an idle QUIC connection may stay open.

@@ -156,6 +156,22 @@ pub struct HTTP3 {
 	#[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
 	#[serde(default)]
 	pub keep_alive_interval: Option<Duration>,
+	/// Congestion controller of QUIC connections. Defaults to `cubic`. `bbr` is experimental in the
+	/// QUIC implementation the gateway uses.
+	#[serde(default)]
+	pub congestion_control: HTTP3CongestionControl,
+}
+
+#[apply(schema_enum!)]
+#[derive(Default)]
+pub enum HTTP3CongestionControl {
+	/// CUBIC (RFC 9438).
+	#[default]
+	Cubic,
+	/// NewReno (RFC 9002, section 7).
+	NewReno,
+	/// BBR. Experimental.
+	Bbr,
 }
 
 fn deserialize_nonzero_duration<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>

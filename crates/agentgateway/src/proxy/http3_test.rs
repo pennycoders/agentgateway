@@ -1170,6 +1170,7 @@ fn transport_limits() {
 			send_window: 10 * 1024 * 1024,
 			idle_timeout: Duration::from_secs(30),
 			keep_alive_interval: None,
+			congestion_control: frontend::HTTP3CongestionControl::Cubic,
 		}
 	);
 	assert!(limits.transport_config().is_ok());
@@ -1209,6 +1210,32 @@ fn transport_limits() {
 	let http3: frontend::HTTP3 =
 		serde_json::from_value(json!({ "keepAliveInterval": "30s" })).unwrap();
 	assert!(TransportLimits::new(&http3).transport_config().is_err());
+}
+
+#[test]
+fn congestion_control() {
+	fn controller(congestion_control: &str) -> Box<dyn std::any::Any> {
+		let http3: frontend::HTTP3 =
+			serde_json::from_value(json!({ "congestionControl": congestion_control })).unwrap();
+		let limits = TransportLimits::new(&http3);
+		assert!(limits.transport_config().is_ok());
+		// quinn's default is CUBIC.
+		let factory = limits
+			.congestion_controller_factory()
+			.unwrap_or_else(|| Arc::new(quinn::congestion::CubicConfig::default()));
+		factory.build(Instant::now(), 1200).into_any()
+	}
+	assert!(
+		TransportLimits::new(&frontend::HTTP3::default())
+			.congestion_controller_factory()
+			.is_none()
+	);
+	assert!(controller("cubic").is::<quinn::congestion::Cubic>());
+	assert!(controller("newReno").is::<quinn::congestion::NewReno>());
+	assert!(controller("bbr").is::<quinn::congestion::Bbr>());
+	assert!(
+		serde_json::from_value::<frontend::HTTP3>(json!({ "congestionControl": "vegas" })).is_err()
+	);
 }
 
 #[test]

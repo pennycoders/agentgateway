@@ -892,7 +892,21 @@ type FrontendHTTP3 struct {
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s')",message="keepAliveInterval must be at least 1 second"
 	// +optional
 	KeepAliveInterval *Duration `json:"keepAliveInterval,omitempty"`
+	// Congestion controller of QUIC connections. `BBR` is experimental in
+	// the QUIC implementation of the gateway.
+	// If unset, this defaults to `Cubic`.
+	// +optional
+	CongestionControl *HTTP3CongestionControl `json:"congestionControl,omitempty"`
 }
+
+// +k8s:enum
+type HTTP3CongestionControl string
+
+const (
+	HTTP3CongestionControlCubic   HTTP3CongestionControl = "Cubic"
+	HTTP3CongestionControlNewReno HTTP3CongestionControl = "NewReno"
+	HTTP3CongestionControlBBR     HTTP3CongestionControl = "BBR"
+)
 
 // +kubebuilder:validation:AtLeastOneFieldSet
 type FrontendTLS struct {

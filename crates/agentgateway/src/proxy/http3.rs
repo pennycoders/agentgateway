@@ -260,6 +260,7 @@ struct TransportLimits {
 	send_window: u64,
 	idle_timeout: Duration,
 	keep_alive_interval: Option<Duration>,
+	congestion_control: frontend::HTTP3CongestionControl,
 }
 
 impl TransportLimits {
@@ -274,6 +275,22 @@ impl TransportLimits {
 			send_window: u64::from(DEFAULT_STREAM_RECEIVE_WINDOW) * SEND_WINDOW_STREAM_WINDOWS,
 			idle_timeout: settings.idle_timeout(),
 			keep_alive_interval: settings.keep_alive_interval,
+			congestion_control: settings.congestion_control,
+		}
+	}
+
+	/// The congestion controller for the connections, or `None` for quinn's default, CUBIC.
+	fn congestion_controller_factory(
+		&self,
+	) -> Option<Arc<dyn quinn::congestion::ControllerFactory + Send + Sync>> {
+		match self.congestion_control {
+			frontend::HTTP3CongestionControl::Cubic => None,
+			frontend::HTTP3CongestionControl::NewReno => {
+				Some(Arc::new(quinn::congestion::NewRenoConfig::default()))
+			},
+			frontend::HTTP3CongestionControl::Bbr => {
+				Some(Arc::new(quinn::congestion::BbrConfig::default()))
+			},
 		}
 	}
 
@@ -298,6 +315,9 @@ impl TransportLimits {
 			.datagram_receive_buffer_size(None)
 			.max_idle_timeout(Some(self.idle_timeout.try_into()?))
 			.keep_alive_interval(self.keep_alive_interval);
+		if let Some(factory) = self.congestion_controller_factory() {
+			transport.congestion_controller_factory(factory);
+		}
 		Ok(transport)
 	}
 }

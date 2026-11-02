@@ -622,6 +622,16 @@ func translateFrontendHTTP(policy *agentgateway.AgentgatewayPolicy, name string)
 		if v := h3.AltSvcPort; v != nil {
 			spec.Http3.AltSvcPort = castUint32(v) //nolint:gosec // G115: kubebuilder validation ensures safe for uint32
 		}
+		if v := h3.CongestionControl; v != nil {
+			switch *v {
+			case agentgateway.HTTP3CongestionControlCubic:
+				spec.Http3.CongestionControl = api.FrontendPolicySpec_HTTP_HTTP3_CUBIC
+			case agentgateway.HTTP3CongestionControlNewReno:
+				spec.Http3.CongestionControl = api.FrontendPolicySpec_HTTP_HTTP3_NEW_RENO
+			case agentgateway.HTTP3CongestionControlBBR:
+				spec.Http3.CongestionControl = api.FrontendPolicySpec_HTTP_HTTP3_BBR
+			}
+		}
 	}
 
 	httpPolicy := &api.Policy{

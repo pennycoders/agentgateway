@@ -39,6 +39,7 @@ use crate::types::proto::agent::backend_policy_spec::ai::{
 };
 use crate::types::proto::agent::backend_policy_spec::backend_http::HttpVersion;
 use crate::types::proto::agent::frontend_policy_spec::http::HttpHeaderCase;
+use crate::types::proto::agent::frontend_policy_spec::http::http3::CongestionControl as Http3CongestionControl;
 use crate::types::proto::agent::mcp_target::Protocol;
 use crate::types::proto::agent::traffic_policy_spec::ext_proc::{
 	BodySendMode as XdsBodySendMode, HeaderTrailerSendMode as XdsHeaderTrailerSendMode,
@@ -3578,6 +3579,11 @@ fn frontend_policy_from_proto(
 						idle_timeout: nonzero("idleTimeout", h3.idle_timeout)?,
 						request_header_timeout: nonzero("requestHeaderTimeout", h3.request_header_timeout)?,
 						keep_alive_interval: nonzero("keepAliveInterval", h3.keep_alive_interval)?,
+						congestion_control: match Http3CongestionControl::try_from(h3.congestion_control)? {
+							Http3CongestionControl::Cubic => frontend::HTTP3CongestionControl::Cubic,
+							Http3CongestionControl::NewReno => frontend::HTTP3CongestionControl::NewReno,
+							Http3CongestionControl::Bbr => frontend::HTTP3CongestionControl::Bbr,
+						},
 						max_concurrent_streams: h3
 							.max_concurrent_streams
 							.and_then(std::num::NonZeroU32::new),
@@ -6639,6 +6645,7 @@ mod tests {
 				seconds: 3,
 				nanos: 0,
 			}),
+			congestion_control: Http3CongestionControl::Bbr as i32,
 		}));
 		let FrontendPolicy::HTTP(enabled) = frontend_policy_from_proto(&spec, &mut diag)? else {
 			panic!("Expected HTTP policy variant");
@@ -6652,6 +6659,7 @@ mod tests {
 				alt_svc_port: std::num::NonZeroU16::new(8443),
 				request_header_timeout: Some(Duration::from_secs(5)),
 				keep_alive_interval: Some(Duration::from_secs(3)),
+				congestion_control: crate::types::frontend::HTTP3CongestionControl::Bbr,
 			})
 		);
 

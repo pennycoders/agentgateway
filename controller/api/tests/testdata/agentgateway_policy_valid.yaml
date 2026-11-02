@@ -317,6 +317,7 @@ spec:
         altSvcPort: 443
         requestHeaderTimeout: 30s
         keepAliveInterval: 15s
+        congestionControl: NewReno
 ---
 apiVersion: agentgateway.dev/v1alpha1
 kind: AgentgatewayPolicy

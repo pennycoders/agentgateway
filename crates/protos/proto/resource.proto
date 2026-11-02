@@ -791,6 +791,14 @@ message FrontendPolicySpec {
       // connections then stay open while the client answers. Unset sends none.
       // Must not be zero, and must be shorter than idle_timeout.
       google.protobuf.Duration keep_alive_interval = 6;
+      enum CongestionControl {
+        CUBIC = 0;
+        NEW_RENO = 1;
+        // Experimental in the QUIC implementation.
+        BBR = 2;
+      }
+      // Congestion controller of QUIC connections. Defaults to CUBIC.
+      CongestionControl congestion_control = 7;
     }
     // Serve HTTP/3 (QUIC) on the UDP port matching each HTTPS listener of the bind,
     // and advertise it with Alt-Svc. Unset disables HTTP/3.

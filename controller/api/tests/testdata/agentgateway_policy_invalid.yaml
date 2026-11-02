@@ -428,6 +428,21 @@ spec:
       http3:
         keepAliveInterval: 30s
 ---
+_err: 'http.http3.congestionControl'
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: frontend-http3-congestion-control-unknown
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: dummy
+  frontend:
+    http:
+      http3:
+        congestionControl: Vegas
+---
 _err: 'http.http3.altSvcMaxAge'
 apiVersion: agentgateway.dev/v1alpha1
 kind: AgentgatewayPolicy

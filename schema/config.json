@@ -10914,9 +10914,33 @@
             "null"
           ],
           "default": null
+        },
+        "congestionControl": {
+          "description": "Congestion controller of QUIC connections. Defaults to `cubic`. `bbr` is experimental in the\nQUIC implementation the gateway uses.",
+          "$ref": "#/$defs/HTTP3CongestionControl",
+          "default": "cubic"
         }
       },
       "additionalProperties": false
+    },
+    "HTTP3CongestionControl": {
+      "oneOf": [
+        {
+          "description": "CUBIC (RFC 9438).",
+          "type": "string",
+          "const": "cubic"
+        },
+        {
+          "description": "NewReno (RFC 9002, section 7).",
+          "type": "string",
+          "const": "newReno"
+        },
+        {
+          "description": "BBR. Experimental.",
+          "type": "string",
+          "const": "bbr"
+        }
+      ]
     },
     "TLS": {
       "type": "object",

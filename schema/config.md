@@ -1602,6 +1602,7 @@
 |`frontendPolicies.http.http3.altSvcPort`|integer|UDP port advertised in `Alt-Svc`, when clients reach the QUIC endpoint on a different port<br>than the one it listens on, for example behind NAT or a load balancer. Defaults to the<br>port of the bind.|
 |`frontendPolicies.http.http3.requestHeaderTimeout`|string|How long a client may take to send the headers of a request on a new request stream<br>before the request is rejected. Defaults to 30 seconds. Must not be zero.|
 |`frontendPolicies.http.http3.keepAliveInterval`|string|Interval at which the gateway sends QUIC PING frames on idle connections, for clients behind<br>NATs that drop UDP mappings after a short time. Idle connections then stay open while the<br>client answers, and `idleTimeout` only closes those whose client went away. Disabled when<br>unset. Must not be zero, and must be shorter than `idleTimeout`.|
+|`frontendPolicies.http.http3.congestionControl`|enum|Congestion controller of QUIC connections. Defaults to `cubic`. `bbr` is experimental in the<br>QUIC implementation the gateway uses.<br>Possible values: `cubic`, `newReno`, `bbr`.|
 |`frontendPolicies.tls`|object|Settings for handling incoming TLS connections.|
 |`frontendPolicies.tls.handshakeTimeout`|string|Maximum time allowed to complete the downstream TLS handshake.|
 |`frontendPolicies.tls.alpn`|array|ALPN protocols advertised to downstream clients.|
