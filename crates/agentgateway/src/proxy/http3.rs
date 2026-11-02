@@ -1275,7 +1275,9 @@ async fn serve_request(
 			return;
 		},
 	};
-	let content_length = match request_content_length(req.headers()) {
+	let content_length = match check_connection_specific_fields(req.headers())
+		.and_then(|()| request_content_length(req.headers()))
+	{
 		Ok(length) => length,
 		Err(e) => {
 			// Malformed requests are stream errors (RFC 9114, section 4.1.2).
@@ -1424,6 +1426,31 @@ struct RequestBody {
 }
 
 /// The `content-length` of a request, which must be unambiguous.
+/// A request carrying connection-specific header fields is malformed (RFC 9114, section 4.2), as
+/// over HTTP/2. Forwarding them would let an HTTP/3 request act on the upstream connection, for
+/// example as an `Upgrade` to WebSocket. `TE` is allowed with the value `trailers` only.
+fn check_connection_specific_fields(headers: &HeaderMap) -> anyhow::Result<()> {
+	for name in [
+		header::CONNECTION,
+		header::TRANSFER_ENCODING,
+		header::UPGRADE,
+		header::HeaderName::from_static("keep-alive"),
+		header::HeaderName::from_static("proxy-connection"),
+	] {
+		if headers.contains_key(&name) {
+			anyhow::bail!("connection-specific header field {name}");
+		}
+	}
+	if headers
+		.get_all(header::TE)
+		.iter()
+		.any(|te| !te.as_bytes().eq_ignore_ascii_case(b"trailers"))
+	{
+		anyhow::bail!("te header field other than trailers");
+	}
+	Ok(())
+}
+
 fn request_content_length(headers: &HeaderMap) -> anyhow::Result<Option<u64>> {
 	let mut lengths = headers.get_all(header::CONTENT_LENGTH).iter();
 	let Some(value) = lengths.next() else {

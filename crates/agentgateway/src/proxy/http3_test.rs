@@ -450,6 +450,48 @@ async fn content_length_must_match_the_body() {
 }
 
 #[tokio::test]
+async fn connection_specific_fields_are_malformed() {
+	let (mock, t, port) = setup(Some(json!({}))).await;
+	wait_for_http3(&t, true).await;
+	let mut client = connect(port, "a.example.com").await;
+	for (name, value) in [
+		("connection", "upgrade"),
+		("upgrade", "websocket"),
+		("transfer-encoding", "chunked"),
+		("keep-alive", "timeout=5"),
+		("proxy-connection", "keep-alive"),
+		("te", "gzip"),
+	] {
+		let req = ::http::Request::builder()
+			.uri("https://a.example.com/")
+			.header(name, value)
+			.body(())
+			.unwrap();
+		let mut stream = client.send.send_request(req).await.unwrap();
+		stream.finish().await.unwrap();
+		let err = stream.recv_response().await.expect_err(name);
+		assert!(
+			format!("{err:?}").contains("H3_MESSAGE_ERROR"),
+			"{name}: {err:?}"
+		);
+	}
+	assert!(
+		mock
+			.received_requests()
+			.await
+			.unwrap_or_default()
+			.is_empty()
+	);
+	// `te: trailers` is allowed, and the connection is still usable.
+	let req = ::http::Request::builder()
+		.uri("https://a.example.com/")
+		.header(header::TE, "trailers")
+		.body(())
+		.unwrap();
+	assert_eq!(client.request(req, None).await.status, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn route_policies_apply() {
 	let (_mock, mut t, port) = setup(Some(json!({}))).await;
 	t.attach_route_policy(json!({
